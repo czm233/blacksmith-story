@@ -14,6 +14,8 @@ export interface DamageNumber {
   color: string;
 }
 
+export type SceneInteractionMode = 'fps' | 'forging';
+
 export class ForgeScene3D {
   private container: HTMLElement;
   private scene: THREE.Scene;
@@ -21,7 +23,10 @@ export class ForgeScene3D {
   private renderer: THREE.WebGLRenderer;
   private assembler: WeaponAssembler;
 
-  // 场景物体
+  // 场景核心模式：'fps' 第一人称工坊漫游 或 'forging' 打铁特写视角
+  public mode: SceneInteractionMode = 'fps';
+
+  // 场景主要物体
   private weaponGroup: THREE.Group | null = null;
   private workpieceGroup: THREE.Group = new THREE.Group();
   private hotBilletMesh: THREE.Mesh | null = null;
@@ -30,9 +35,14 @@ export class ForgeScene3D {
   private anvilGroup: THREE.Group = new THREE.Group();
   private dummyGroup: THREE.Group = new THREE.Group();
   
-  // 右手持锤系统 (右手臂 + 拳头 + 铁锤)
+  // 右手持锤系统 (打铁视角使用)
   private rightArmGroup: THREE.Group = new THREE.Group();
-  private hammerHeadMesh: THREE.Mesh | null = null;
+
+  // 第一人称手持武器视图模型 (FPS 漫游手持视角)
+  private heldWeaponViewmodelGroup: THREE.Group = new THREE.Group();
+  public isHoldingWeapon: boolean = false;
+  private isSlashing: boolean = false;
+  private currentBlueprint: BlueprintDef | null = null;
 
   // 粒子系统
   private sparkParticles: THREE.Points | null = null;
@@ -50,20 +60,28 @@ export class ForgeScene3D {
   private fireLight!: THREE.PointLight;
   private fillLight!: THREE.DirectionalLight;
 
-  // 交互与视角状态 (默认站在铁砧宽的一侧: theta ≈ PI/2)
-  private isDragging: boolean = false;
-  private previousMousePosition = { x: 0, y: 0 };
-  private cameraAngle = { theta: Math.PI / 2, phi: 1.05, radius: 1.05 };
-  private cameraLookTarget = new THREE.Vector3(0, -0.015, 0);
-  public autoRotate: boolean = false;
-  private showSockets: boolean = false;
-  private animationFrameId: number | null = null;
+  // 第一人称漫游控制状态 (FPS)
+  private playerPos = new THREE.Vector3(0.85, 1.45, 0.0); // 眼睛高度 1.45m
+  private yaw: number = Math.PI / 2; // 水平朝向 (默认面对铁砧宽侧)
+  private pitch: number = -0.15; // 垂直俯仰
+  private keysPressed: Set<string> = new Set();
+  public isPointerLocked: boolean = false;
+
+  // 准星射线拾取检测
+  private raycaster = new THREE.Raycaster();
+  private currentInteractTarget: 'anvil' | 'weapon' | 'dummy' | null = null;
 
   // 打击状态
   private isHammerStriking: boolean = false;
+  private animationFrameId: number | null = null;
 
-  // 回调
+  // 外部回调接口
   private onDamagePopup: ((dmg: DamageNumber) => void) | null = null;
+  private onPromptChange: ((prompt: string | null) => void) | null = null;
+  private onEnterForgeModeCallback: (() => void) | null = null;
+  private onWeaponPickupCallback: (() => void) | null = null;
+  private onWeaponDropCallback: (() => void) | null = null;
+  private onMeleeAttackCallback: (() => { damage: number; isCrit: boolean }) | null = null;
 
   constructor(container: HTMLElement, initialLighting: LightingConfig = DEFAULT_LIGHTING_CONFIG) {
     this.container = container;
@@ -74,12 +92,17 @@ export class ForgeScene3D {
     this.scene.background = new THREE.Color(0x13131c);
     this.scene.fog = new THREE.FogExp2(0x13131c, 0.08);
 
-    // 2. 初始化相机
+    // 2. 初始化相机 (第一人称视点)
     const aspect = container.clientWidth / (container.clientHeight || 1);
-    this.camera = new THREE.PerspectiveCamera(45, aspect, 0.1, 100);
-    this.updateCameraPosition();
+    this.camera = new THREE.PerspectiveCamera(55, aspect, 0.1, 100);
+    this.camera.rotation.order = 'YXZ';
+    this.updateFPSCamera();
+    this.scene.add(this.camera);
 
-    // 3. 初始化渲染器
+    // 3. 构建手持武器 Viewmodel (随相机移动)
+    this.buildHeldWeaponViewmodel();
+
+    // 4. 初始化渲染器
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -89,7 +112,7 @@ export class ForgeScene3D {
     this.renderer.toneMappingExposure = initialLighting.exposure;
     container.appendChild(this.renderer.domElement);
 
-    // 4. 构建环境灯光与道具
+    // 5. 构建环境灯光与道具
     this.setupLighting(initialLighting);
     this.buildWorkshopEnvironment();
     this.buildAnvil();
@@ -99,13 +122,41 @@ export class ForgeScene3D {
     this.setupSparkParticleSystem();
     this.setupSteamParticleSystem();
 
-    // 5. 事件监听
+    // 6. 事件监听与主循环
     this.setupEventListeners();
     this.startRenderLoop();
   }
 
+  // 绑定外部回调
   public setDamagePopupCallback(cb: (dmg: DamageNumber) => void) {
     this.onDamagePopup = cb;
+  }
+  public setPromptCallback(cb: (prompt: string | null) => void) {
+    this.onPromptChange = cb;
+  }
+  public setEnterForgeModeCallback(cb: () => void) {
+    this.onEnterForgeModeCallback = cb;
+  }
+  public setWeaponPickupCallback(cb: () => void) {
+    this.onWeaponPickupCallback = cb;
+  }
+  public setWeaponDropCallback(cb: () => void) {
+    this.onWeaponDropCallback = cb;
+  }
+  public setMeleeAttackCallback(cb: () => { damage: number; isCrit: boolean }) {
+    this.onMeleeAttackCallback = cb;
+  }
+
+  // ==================== 第一人称持剑 Viewmodel ====================
+  private buildHeldWeaponViewmodel() {
+    this.heldWeaponViewmodelGroup = new THREE.Group();
+    this.heldWeaponViewmodelGroup.name = 'HeldWeaponViewmodel';
+
+    // 初始就位在视线右下侧
+    this.heldWeaponViewmodelGroup.position.set(0.26, -0.25, -0.48);
+    this.heldWeaponViewmodelGroup.rotation.set(0.2, -0.35, 0.45);
+    this.heldWeaponViewmodelGroup.visible = false;
+    this.camera.add(this.heldWeaponViewmodelGroup);
   }
 
   // ==================== 灯光系统与实时调节 ====================
@@ -181,6 +232,7 @@ export class ForgeScene3D {
   // ==================== 铁砧构建 (长轴沿 Z，宽侧在 X) ====================
   private buildAnvil() {
     this.anvilGroup = new THREE.Group();
+    this.anvilGroup.name = 'AnvilInteractive';
     this.anvilGroup.position.set(0, -0.6, 0);
 
     // 垫木桩底座
@@ -199,7 +251,7 @@ export class ForgeScene3D {
     base.castShadow = true;
     this.anvilGroup.add(base);
 
-    // 砧面 (工作台面，顶部高约 -0.02m，长 0.58m 沿 Z，宽 0.26m 沿 X)
+    // 砧面 (工作台面，顶部高约 -0.02m)
     const topGeo = new THREE.BoxGeometry(0.26, 0.08, 0.58);
     const top = new THREE.Mesh(topGeo, anvilMat);
     top.position.y = 0.54;
@@ -220,10 +272,8 @@ export class ForgeScene3D {
   private buildWorkpieceElements() {
     this.workpieceGroup = new THREE.Group();
     this.workpieceGroup.name = 'WorkpieceGroup';
-    // 铁砧顶面实际高度在 y = -0.02m，粗胚横卧其上
     this.workpieceGroup.position.set(0, -0.012, 0);
 
-    // 1. 横卧长条金属粗胚 (Hot Billet，长轴沿 Z 延展)
     const billetGeo = new THREE.BoxGeometry(0.065, 0.02, 0.42);
     const billetMat = new THREE.MeshStandardMaterial({
       color: 0x991b1b,
@@ -236,7 +286,6 @@ export class ForgeScene3D {
     this.hotBilletMesh.castShadow = true;
     this.workpieceGroup.add(this.hotBilletMesh);
 
-    // 2. 粗胚底部炽热反光
     const glowGeo = new THREE.PlaneGeometry(0.18, 0.48);
     const glowMat = new THREE.MeshBasicMaterial({
       color: 0xff5500,
@@ -302,12 +351,12 @@ export class ForgeScene3D {
     this.scene.add(this.dummyGroup);
   }
 
-  // ==================== 右手持锤系统 (右手臂 + 拳套 + 锻造方锤，位于视野右侧) ====================
+  // ==================== 右手持锤系统 (打铁特写视角) ====================
   private buildRightArmAndHammer() {
     this.rightArmGroup = new THREE.Group();
     this.rightArmGroup.name = 'RightArmAndHammer';
 
-    // 1. 小臂 (皮护腕工匠手臂，从画面右侧进入: Z < 0 为屏幕右侧)
+    // 1. 小臂 (皮护腕工匠手臂，位于屏幕右侧 Z < 0)
     const forearmGeo = new THREE.CylinderGeometry(0.036, 0.046, 0.32, 12);
     const armMat = new THREE.MeshStandardMaterial({
       color: 0x482b18,
@@ -320,7 +369,7 @@ export class ForgeScene3D {
     forearm.position.set(0.16, -0.06, -0.08);
     this.rightArmGroup.add(forearm);
 
-    // 2. 握持铁锤的手部拳套 (Gloved Fist)
+    // 2. 拳套
     const fistGeo = new THREE.BoxGeometry(0.06, 0.065, 0.085);
     const fistMat = new THREE.MeshStandardMaterial({
       color: 0x5c3822,
@@ -331,7 +380,7 @@ export class ForgeScene3D {
     fist.position.set(0.04, 0.02, -0.02);
     this.rightArmGroup.add(fist);
 
-    // 3. 锤柄 (白蜡木坚韧长柄，被拳头紧握)
+    // 3. 锤柄
     const handleGeo = new THREE.CylinderGeometry(0.015, 0.017, 0.44, 10);
     const handleMat = new THREE.MeshStandardMaterial({ color: 0x854d0e, roughness: 0.75 });
     const handle = new THREE.Mesh(handleGeo, handleMat);
@@ -340,21 +389,22 @@ export class ForgeScene3D {
     handle.position.set(0.04, 0.06, -0.04);
     this.rightArmGroup.add(handle);
 
-    // 4. 重型精铸方锤头 (Hammerhead)
+    // 4. 重型精铸方锤头
     const headGeo = new THREE.BoxGeometry(0.09, 0.08, 0.15);
     const headMat = new THREE.MeshStandardMaterial({
       color: 0x272b33,
       roughness: 0.3,
       metalness: 0.92
     });
-    this.hammerHeadMesh = new THREE.Mesh(headGeo, headMat);
-    this.hammerHeadMesh.castShadow = true;
-    this.hammerHeadMesh.position.set(0.04, 0.22, -0.15);
-    this.rightArmGroup.add(this.hammerHeadMesh);
+    const hammerHeadMesh = new THREE.Mesh(headGeo, headMat);
+    hammerHeadMesh.castShadow = true;
+    hammerHeadMesh.position.set(0.04, 0.22, -0.15);
+    this.rightArmGroup.add(hammerHeadMesh);
 
-    // 待命准备姿态：位于视线【右侧】(Z = -0.22 为屏幕右侧)，斜向上高举蓄势
+    // 初始位置在右侧
     this.rightArmGroup.position.set(0.24, 0.22, -0.22);
     this.rightArmGroup.rotation.set(0.3, 0.35, -0.25);
+    this.rightArmGroup.visible = false; // 仅在打铁视角显现
     this.scene.add(this.rightArmGroup);
   }
 
@@ -466,82 +516,281 @@ export class ForgeScene3D {
     });
   }
 
-  // ==================== 人的视角：站在铁砧宽的一侧 ====================
+  // ==================== 模式切换：FPS 漫游 ⇄ 打铁特写 ====================
 
   /**
-   * 打造聚焦视角：人站在铁砧宽的一侧 (+X 侧)，近距离俯视横卧在铁砧上的粗胚与武器
+   * 切换至打铁特写视角 (拿锤子)
    */
-  public focusAnvil() {
-    this.autoRotate = false;
-    // theta = Math.PI / 2 (直对宽侧), phi = 1.05 (俯视约 30 度), radius = 0.92m
-    gsap.to(this.cameraAngle, {
-      theta: Math.PI / 2,
-      phi: 1.05,
-      radius: 0.92,
-      duration: 0.75,
-      ease: 'power2.inOut',
-      onUpdate: () => this.updateCameraPosition()
+  public enterForgingMode(blueprint: BlueprintDef) {
+    this.mode = 'forging';
+    this.currentBlueprint = blueprint;
+
+    // 如果手持武器，先放下到铁砧上
+    if (this.isHoldingWeapon) {
+      this.dropWeapon(true);
+    }
+
+    this.rightArmGroup.visible = true;
+
+    // 镜头平滑运镜到铁砧宽侧工作面近景
+    gsap.to(this.camera.position, {
+      x: 0.72,
+      y: 0.35,
+      z: 0.0,
+      duration: 0.65,
+      ease: 'power2.inOut'
     });
-    gsap.to(this.cameraLookTarget, {
-      x: 0,
-      y: -0.015,
-      z: 0.02,
-      duration: 0.75,
-      ease: 'power2.inOut',
-      onUpdate: () => this.updateCameraPosition()
+
+    const targetRot = new THREE.Euler(-0.45, Math.PI / 2, 0, 'YXZ');
+    gsap.to(this.camera.rotation, {
+      x: targetRot.x,
+      y: targetRot.y,
+      z: targetRot.z,
+      duration: 0.65,
+      ease: 'power2.inOut'
     });
+
+    if (this.onEnterForgeModeCallback) {
+      this.onEnterForgeModeCallback();
+    }
   }
 
   /**
-   * 全景站位视角：站在宽侧稍远处纵观全局
+   * 退出打铁特写，返回第一人称自由漫游
    */
-  public focusHeroPedestal() {
-    gsap.to(this.cameraAngle, {
-      theta: Math.PI / 2 + 0.25,
-      phi: 1.12,
-      radius: 1.85,
-      duration: 0.85,
+  public exitForgingMode() {
+    this.mode = 'fps';
+    this.rightArmGroup.visible = false;
+
+    // 镜头平滑返回站立视角
+    gsap.to(this.camera.position, {
+      x: this.playerPos.x,
+      y: this.playerPos.y,
+      z: this.playerPos.z,
+      duration: 0.6,
       ease: 'power2.out',
-      onUpdate: () => this.updateCameraPosition()
-    });
-    gsap.to(this.cameraLookTarget, {
-      x: 0,
-      y: 0.05,
-      z: 0,
-      duration: 0.85,
-      ease: 'power2.out',
-      onUpdate: () => this.updateCameraPosition(),
       onComplete: () => {
-        this.autoRotate = false;
+        this.updateFPSCamera();
       }
     });
   }
 
-  // ==================== 武器横卧铁砧 + 渐进式显现 ====================
+  // ==================== 武器捡起与丢弃 (左键拾起 / 右键松手丢弃) ====================
 
   /**
-   * 待锻造状态：粗胚与全息图纸模版严格【横卧】在铁砧上
+   * 按左键捡起武器
    */
+  public pickupWeapon() {
+    if (this.isHoldingWeapon || !this.currentBlueprint) return;
+
+    sound.playClick();
+    this.isHoldingWeapon = true;
+
+    // 隐藏铁砧/地面上的静态武器
+    if (this.weaponGroup) {
+      this.weaponGroup.visible = false;
+    }
+
+    // 在相机上挂载第一人称 Viewmodel 武器
+    this.rebuildHeldWeaponViewmodel(this.currentBlueprint);
+    this.heldWeaponViewmodelGroup.visible = true;
+
+    // 抓起武器进场微弹簧
+    this.heldWeaponViewmodelGroup.position.set(0.26, -0.4, -0.48);
+    gsap.to(this.heldWeaponViewmodelGroup.position, {
+      y: -0.25,
+      duration: 0.35,
+      ease: 'back.out(1.5)'
+    });
+
+    if (this.onWeaponPickupCallback) {
+      this.onWeaponPickupCallback();
+    }
+  }
+
+  /**
+   * 按右键松手扔掉武器
+   */
+  public dropWeapon(placeOnAnvil: boolean = false) {
+    if (!this.isHoldingWeapon) return;
+
+    sound.playClick();
+    this.isHoldingWeapon = false;
+    this.heldWeaponViewmodelGroup.visible = false;
+
+    // 如果在铁砧附近，整齐放回铁砧；否则丢在身前地面
+    if (this.weaponGroup) {
+      this.weaponGroup.visible = true;
+
+      if (placeOnAnvil || this.playerPos.distanceTo(new THREE.Vector3(0, 0, 0)) < 1.8) {
+        // 放回铁砧横卧位 (手柄在左，剑刃在右)
+        this.weaponGroup.rotation.set(-Math.PI / 2, 0, 0);
+        this.weaponGroup.position.set(0, -0.015, 0.15);
+      } else {
+        // 丢在玩家身前地面
+        const fwd = this.getCameraForwardFlat();
+        this.weaponGroup.rotation.set(-Math.PI / 2, Math.random() * 0.4, 0);
+        this.weaponGroup.position.set(
+          this.playerPos.x + fwd.x * 0.9,
+          -0.68,
+          this.playerPos.z + fwd.z * 0.9
+        );
+      }
+    }
+
+    if (this.onWeaponDropCallback) {
+      this.onWeaponDropCallback();
+    }
+  }
+
+  /**
+   * 重构第一人称手持武器 Viewmodel
+   */
+  private rebuildHeldWeaponViewmodel(blueprint: BlueprintDef) {
+    while (this.heldWeaponViewmodelGroup.children.length > 0) {
+      this.heldWeaponViewmodelGroup.remove(this.heldWeaponViewmodelGroup.children[0]);
+    }
+
+    const meshGroup = this.assembler.assembleWeapon(blueprint, {}, false);
+    // 缩放到适合第一人称握持的大小
+    meshGroup.scale.set(0.7, 0.7, 0.7);
+    this.heldWeaponViewmodelGroup.add(meshGroup);
+  }
+
+  // ==================== 挥剑攻击木桩 (第一人称左键斩击) ====================
+  public swingWeaponAttack() {
+    if (!this.isHoldingWeapon || this.isSlashing) return;
+    this.isSlashing = true;
+
+    // 第一人称快速斜切斩击 (GSAP)
+    const tl = gsap.timeline({
+      onComplete: () => {
+        this.isSlashing = false;
+      }
+    });
+
+    // 1. 蓄力微拉
+    tl.to(this.heldWeaponViewmodelGroup.position, {
+      x: 0.32,
+      y: -0.18,
+      z: -0.4,
+      duration: 0.08,
+      ease: 'power1.out'
+    })
+    .to(this.heldWeaponViewmodelGroup.rotation, {
+      x: 0.4,
+      y: -0.1,
+      z: 0.65,
+      duration: 0.08,
+      ease: 'power1.out'
+    }, '<')
+    // 2. 闪电斜向破空横斩
+    .to(this.heldWeaponViewmodelGroup.position, {
+      x: -0.15,
+      y: -0.22,
+      z: -0.52,
+      duration: 0.1,
+      ease: 'power3.in',
+      onComplete: () => {
+        sound.playSlashHit(false);
+        this.checkMeleeDummyHit();
+      }
+    })
+    .to(this.heldWeaponViewmodelGroup.rotation, {
+      x: -0.6,
+      y: 0.6,
+      z: -0.9,
+      duration: 0.1,
+      ease: 'power3.in'
+    }, '<')
+    // 3. 收招回位
+    .to(this.heldWeaponViewmodelGroup.position, {
+      x: 0.26,
+      y: -0.25,
+      z: -0.48,
+      duration: 0.22,
+      ease: 'back.out(1.4)'
+    }, '+=0.06')
+    .to(this.heldWeaponViewmodelGroup.rotation, {
+      x: 0.2,
+      y: -0.35,
+      z: 0.45,
+      duration: 0.22,
+      ease: 'back.out(1.4)'
+    }, '<');
+  }
+
+  /**
+   * 检测第一人称斩击是否命中木桩
+   */
+  private checkMeleeDummyHit() {
+    // 检查玩家与木桩距离
+    const dummyWorldPos = new THREE.Vector3(1.1, 0.4, -0.2);
+    const dist = this.playerPos.distanceTo(dummyWorldPos);
+
+    if (dist < 2.5) {
+      // 准星朝向木桩
+      const dir = new THREE.Vector3();
+      this.camera.getWorldDirection(dir);
+      const toDummy = dummyWorldPos.clone().sub(this.camera.position).normalize();
+      const dot = dir.dot(toDummy);
+
+      if (dot > 0.65) {
+        // 成功砍中木桩！
+        const isCrit = Math.random() < 0.25;
+        const damageResult = this.onMeleeAttackCallback ? this.onMeleeAttackCallback() : { damage: 85, isCrit };
+
+        sound.playSlashHit(damageResult.isCrit);
+        this.triggerSparkBurst(dummyWorldPos, damageResult.isCrit ? 65 : 35, damageResult.isCrit ? 0xff3b00 : 0xf59e0b);
+
+        // 木桩剧烈弹性晃动
+        gsap.fromTo(this.dummyGroup.rotation,
+          { z: damageResult.isCrit ? -0.45 : -0.25, x: 0.15 },
+          { z: 0, x: 0, duration: 0.85, ease: 'elastic.out(1.2, 0.25)' }
+        );
+
+        // 计算屏幕跳字
+        if (this.onDamagePopup) {
+          const screenPos = dummyWorldPos.clone().project(this.camera);
+          const halfWidth = this.container.clientWidth / 2;
+          const halfHeight = this.container.clientHeight / 2;
+          const screenX = screenPos.x * halfWidth + halfWidth;
+          const screenY = -screenPos.y * halfHeight + halfHeight;
+
+          this.onDamagePopup({
+            id: Math.random().toString(36).substring(2, 9),
+            x: screenX,
+            y: screenY,
+            text: damageResult.isCrit ? `💥 暴击! ${damageResult.damage}` : `⚔️ 命中 ${damageResult.damage}`,
+            isCrit: damageResult.isCrit,
+            color: damageResult.isCrit ? '#ef4444' : '#fbbf24'
+          });
+        }
+      }
+    }
+  }
+
+  // ==================== 模版与渐进式锻造成型 ====================
   public displayWorkpieceTemplate(blueprint: BlueprintDef) {
+    this.currentBlueprint = blueprint;
+
     if (this.weaponGroup) {
       this.scene.remove(this.weaponGroup);
       this.weaponGroup = null;
     }
 
-    // 粗胚横卧
     this.workpieceGroup.visible = true;
     if (this.hotBilletMesh) {
       this.hotBilletMesh.scale.set(1, 1, 1);
       (this.hotBilletMesh.material as THREE.MeshStandardMaterial).emissiveIntensity = 2.6;
     }
 
-    // 移除旧全息线框
     if (this.ghostBlueprintGroup) {
       this.scene.remove(this.ghostBlueprintGroup);
       this.ghostBlueprintGroup = null;
     }
 
-    // 生成全息图纸线框构架，并【横着平放在铁砧上】(沿 Z 轴横向延伸)
+    // 横卧在铁砧上
     this.ghostBlueprintGroup = this.assembler.assembleWeapon(blueprint, {}, true);
     this.ghostBlueprintGroup.traverse((child) => {
       if (child instanceof THREE.Mesh) {
@@ -554,25 +803,16 @@ export class ForgeScene3D {
       }
     });
 
-    // ★ 关键需求：武器横着放在铁砧上，手柄在左侧 (+Z 为屏幕左侧)，剑刃向右侧 (-Z 为屏幕右侧) 延展
     this.ghostBlueprintGroup.rotation.set(-Math.PI / 2, 0, 0);
     this.ghostBlueprintGroup.position.set(0, 0.015, 0.15);
     this.ghostBlueprintGroup.scale.set(0.9, 0.9, 0.9);
     this.scene.add(this.ghostBlueprintGroup);
-
-    // 视角自动回到宽侧
-    this.focusAnvil();
   }
 
-  /**
-   * 打造过程中动态更新（进度 0% ~ 100%）：
-   * 粗胚横向延展变薄，全息线框逐渐凝实为实体！
-   */
   public updateForgingProgress(progress: number, _blueprint: BlueprintDef) {
     const p = Math.max(0, Math.min(1, progress));
 
     if (this.hotBilletMesh) {
-      // 沿着铁砧长轴横向延展
       const sx = 1 + p * 0.7;
       const sy = Math.max(0.25, 1 - p * 0.65);
       const sz = 1 + p * 1.5;
@@ -593,14 +833,10 @@ export class ForgeScene3D {
           }
         }
       });
-      // 随着锤打逐渐贴近砧面
       this.ghostBlueprintGroup.position.y = 0.015 - p * 0.02;
     }
   }
 
-  /**
-   * 淬火大功告成：横卧在铁砧上展现成品真容！
-   */
   public quenchAndReveal(blueprint: BlueprintDef, slotMaterials: Partial<Record<SlotType, MaterialDef>> = {}) {
     this.workpieceGroup.visible = false;
     if (this.ghostBlueprintGroup) {
@@ -608,19 +844,15 @@ export class ForgeScene3D {
       this.ghostBlueprintGroup = null;
     }
 
-    // 淬火白雾
     sound.playQuenchSteam();
     this.triggerSteamBurst(new THREE.Vector3(0, -0.01, 0));
     this.triggerSparkBurst(new THREE.Vector3(0, 0.02, 0), 45, 0xffffff);
 
-    // ★ 关键需求：成品武器横卧在铁砧上展现！
     this.displayWeapon(blueprint, slotMaterials);
   }
 
-  /**
-   * 展示成品武器：【横卧在铁砧上】
-   */
   public displayWeapon(blueprint: BlueprintDef, slotMaterials: Partial<Record<SlotType, MaterialDef>> = {}) {
+    this.currentBlueprint = blueprint;
     this.workpieceGroup.visible = false;
     if (this.ghostBlueprintGroup) {
       this.scene.remove(this.ghostBlueprintGroup);
@@ -632,14 +864,12 @@ export class ForgeScene3D {
       this.weaponGroup = null;
     }
 
-    this.weaponGroup = this.assembler.assembleWeapon(blueprint, slotMaterials, this.showSockets);
-
-    // ★ 关键需求：武器横着放在铁砧上，手柄在左侧 (+Z 为屏幕左侧)，剑尖向右侧 (-Z 为屏幕右侧)
+    this.weaponGroup = this.assembler.assembleWeapon(blueprint, slotMaterials, false);
+    // 横卧在铁砧上，手柄在左 (+Z)，剑身在右 (-Z)
     this.weaponGroup.rotation.set(-Math.PI / 2, 0, 0);
     this.weaponGroup.position.set(0, -0.015, 0.15);
     this.scene.add(this.weaponGroup);
 
-    // 轻微进场弹力
     this.weaponGroup.scale.set(0.1, 0.1, 0.1);
     gsap.to(this.weaponGroup.scale, {
       x: 1,
@@ -650,23 +880,13 @@ export class ForgeScene3D {
     });
   }
 
-  public toggleSocketVisualizer() {
-    this.showSockets = !this.showSockets;
-  }
-
-  // ==================== 右手持锤挥打：按一下再敲 ====================
-
-  /**
-   * 每次鼠标点击打铁：右手持锤由蓄势位下砸砧面，顿帧反弹，绝不自动连击
-   */
+  // ==================== 右手持锤打铁敲击 (按一下敲一锤) ====================
   public triggerHammerTap(isPerfect: boolean = false) {
-    if (this.isHammerStriking) return;
+    if (this.isHammerStriking || this.mode !== 'forging') return;
     this.isHammerStriking = true;
 
-    // 命中工作面中央 (Z ≈ -0.02 为偏向右侧剑身粗胚区)
     const anvilHitPos = new THREE.Vector3(0, -0.01, -0.02);
 
-    // 右手持锤由右侧 (-Z 为屏幕右侧) 向下挥砸
     gsap.timeline({
       onComplete: () => {
         this.isHammerStriking = false;
@@ -679,7 +899,6 @@ export class ForgeScene3D {
       duration: 0.07,
       ease: 'power4.in',
       onComplete: () => {
-        // 瞬间命中铁砧：火花暴射 + 粗胚受力炽亮 + 屏幕微震
         this.triggerSparkBurst(anvilHitPos, isPerfect ? 65 : 40, isPerfect ? 0xffea00 : 0xff5500);
 
         if (this.hotBilletMesh) {
@@ -689,10 +908,9 @@ export class ForgeScene3D {
         }
 
         // 镜头微幅物理震颤
-        const shakeIntensity = isPerfect ? 0.025 : 0.012;
-        gsap.fromTo(this.cameraLookTarget,
-          { y: -0.015 + (Math.random() - 0.5) * shakeIntensity },
-          { y: -0.015, duration: 0.12, ease: 'rough' }
+        gsap.fromTo(this.camera.position,
+          { y: 0.35 + (Math.random() - 0.5) * 0.015 },
+          { y: 0.35, duration: 0.12, ease: 'rough' }
         );
       }
     })
@@ -703,7 +921,6 @@ export class ForgeScene3D {
       duration: 0.07,
       ease: 'power4.in'
     }, '<')
-    // 砸中后回弹就位到右侧蓄势位 (Z = -0.22 为屏幕右侧)
     .to(this.rightArmGroup.position, {
       x: 0.24,
       y: 0.22,
@@ -720,174 +937,116 @@ export class ForgeScene3D {
     }, '<');
   }
 
-  // ==================== ⚔️ 试刀挥砍木桩动画 ====================
-  public animateTestStrike(damage: number, isCrit: boolean = false): Promise<void> {
-    return new Promise((resolve) => {
-      if (!this.weaponGroup) {
-        resolve();
-        return;
-      }
-
-      // 试刀：拿起横卧的武器，挥斩右侧木桩假人
-      const startPos = this.weaponGroup.position.clone();
-      const startRot = this.weaponGroup.rotation.clone();
-
-      const tl = gsap.timeline({
-        onComplete: () => {
-          resolve();
-        }
-      });
-
-      // 1. 抓起武器立起蓄力
-      tl.to(this.weaponGroup.position, {
-        x: 0.5,
-        y: 0.45,
-        z: 0.6,
-        duration: 0.2,
-        ease: 'power2.out'
-      })
-      .to(this.weaponGroup.rotation, {
-        x: -0.4,
-        y: 0.8,
-        z: -1.2,
-        duration: 0.2,
-        ease: 'power2.out'
-      }, '<')
-      // 2. 闪电斩向木桩
-      .to(this.weaponGroup.position, {
-        x: 1.05,
-        y: 0.35,
-        z: -0.15,
-        duration: 0.1,
-        ease: 'power3.in',
-        onComplete: () => {
-          sound.playSlashHit(isCrit);
-
-          const hitWorldPos = new THREE.Vector3(1.1, 0.4, -0.15);
-          this.triggerSparkBurst(hitWorldPos, isCrit ? 70 : 35, isCrit ? 0xff4422 : 0xeab308);
-
-          gsap.fromTo(this.dummyGroup.rotation,
-            { z: isCrit ? -0.45 : -0.25, x: 0.15 },
-            { z: 0, x: 0, duration: 0.85, ease: 'elastic.out(1.2, 0.25)' }
-          );
-
-          if (this.onDamagePopup) {
-            const screenPos = hitWorldPos.clone().project(this.camera);
-            const halfWidth = this.container.clientWidth / 2;
-            const halfHeight = this.container.clientHeight / 2;
-            const screenX = screenPos.x * halfWidth + halfWidth;
-            const screenY = -screenPos.y * halfHeight + halfHeight;
-
-            this.onDamagePopup({
-              id: Math.random().toString(36).substring(2, 9),
-              x: screenX,
-              y: screenY,
-              text: isCrit ? `💥 暴击! ${damage}` : `⚔️ 命中 ${damage}`,
-              isCrit,
-              color: isCrit ? '#ef4444' : '#fbbf24'
-            });
-          }
-        }
-      })
-      // 3. 挥砍后平稳放回铁砧横卧态
-      .to(this.weaponGroup.position, {
-        x: startPos.x,
-        y: startPos.y,
-        z: startPos.z,
-        duration: 0.35,
-        ease: 'back.out(1.2)'
-      }, '+=0.1')
-      .to(this.weaponGroup.rotation, {
-        x: startRot.x,
-        y: startRot.y,
-        z: startRot.z,
-        duration: 0.35,
-        ease: 'back.out(1.2)'
-      }, '<');
-    });
+  // ==================== 第一人称漫游与事件处理 ====================
+  private updateFPSCamera() {
+    this.camera.position.set(this.playerPos.x, this.playerPos.y, this.playerPos.z);
+    this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
   }
 
-  // ==================== 相机更新与鼠标操作 ====================
-  private updateCameraPosition() {
-    const { theta, phi, radius } = this.cameraAngle;
-    this.camera.position.x = this.cameraLookTarget.x + radius * Math.sin(phi) * Math.sin(theta);
-    this.camera.position.y = this.cameraLookTarget.y + radius * Math.cos(phi);
-    this.camera.position.z = this.cameraLookTarget.z + radius * Math.sin(phi) * Math.cos(theta);
-    this.camera.lookAt(this.cameraLookTarget);
+  private getCameraForwardFlat(): THREE.Vector3 {
+    return new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
   }
 
-  public resetCamera() {
-    gsap.to(this.cameraAngle, {
-      theta: Math.PI / 2,
-      phi: 1.05,
-      radius: 0.95,
-      duration: 0.5,
-      onUpdate: () => this.updateCameraPosition()
-    });
-    gsap.to(this.cameraLookTarget, {
-      x: 0,
-      y: -0.015,
-      z: 0.02,
-      duration: 0.5,
-      onUpdate: () => this.updateCameraPosition()
-    });
+  private getCameraRightFlat(): THREE.Vector3 {
+    return new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw)).normalize();
   }
 
-  public focusPart(part: 'all' | 'blade' | 'guard') {
-    let targetRadius = 0.95;
-    let targetZ = 0.02;
+  public requestPointerLock() {
+    this.container.requestPointerLock();
+  }
 
-    if (part === 'blade') {
-      targetZ = -0.18; // 剑尖与剑身位于 -Z 方向 (屏幕右侧)
-      targetRadius = 0.75;
-    } else if (part === 'guard') {
-      targetZ = 0.08; // 护手与手柄握把位于 +Z 方向 (屏幕左侧)
-      targetRadius = 0.65;
+  // 左键点击处理
+  private handleLeftClick() {
+    if (this.mode === 'forging') {
+      return; // 打铁模式下由打铁小游戏组件处理单次敲打
     }
 
-    gsap.to(this.cameraAngle, {
-      radius: targetRadius,
-      duration: 0.6,
-      ease: 'power2.out',
-      onUpdate: () => this.updateCameraPosition()
-    });
-    gsap.to(this.cameraLookTarget, {
-      z: targetZ,
-      duration: 0.6,
-      ease: 'power2.out',
-      onUpdate: () => this.updateCameraPosition()
-    });
+    // 漫游模式下：
+    // 1. 如果瞄准铁砧 -> 切换成打铁视角
+    if (this.currentInteractTarget === 'anvil' && this.currentBlueprint) {
+      this.enterForgingMode(this.currentBlueprint);
+      return;
+    }
+
+    // 2. 如果瞄准武器且未手持 -> 捡起武器
+    if (this.currentInteractTarget === 'weapon' && !this.isHoldingWeapon) {
+      this.pickupWeapon();
+      return;
+    }
+
+    // 3. 如果手持武器 -> 挥剑斩击 (若近身瞄准木桩则造成伤害)
+    if (this.isHoldingWeapon) {
+      this.swingWeaponAttack();
+      return;
+    }
+  }
+
+  // 右键点击处理 (松手扔掉武器)
+  private handleRightClick() {
+    if (this.mode === 'fps' && this.isHoldingWeapon) {
+      this.dropWeapon(false);
+    }
   }
 
   private setupEventListeners() {
     const dom = this.renderer.domElement;
 
-    dom.addEventListener('mousedown', (e) => {
-      this.isDragging = true;
-      this.previousMousePosition = { x: e.clientX, y: e.clientY };
+    // 点击请求 Pointer Lock
+    dom.addEventListener('click', () => {
+      if (this.mode === 'fps' && !this.isPointerLocked) {
+        dom.requestPointerLock();
+      }
     });
 
+    document.addEventListener('pointerlockchange', () => {
+      this.isPointerLocked = document.pointerLockElement === dom;
+    });
+
+    // 鼠标移动视线
     window.addEventListener('mousemove', (e) => {
-      if (!this.isDragging) return;
-      const deltaX = e.clientX - this.previousMousePosition.x;
-      const deltaY = e.clientY - this.previousMousePosition.y;
-
-      this.cameraAngle.theta -= deltaX * 0.008;
-      this.cameraAngle.phi = Math.max(0.4, Math.min(Math.PI / 2.05, this.cameraAngle.phi - deltaY * 0.008));
-
-      this.updateCameraPosition();
-      this.previousMousePosition = { x: e.clientX, y: e.clientY };
+      if (this.mode === 'fps' && this.isPointerLocked) {
+        this.yaw -= e.movementX * 0.0022;
+        this.pitch = Math.max(-Math.PI / 2.3, Math.min(Math.PI / 2.3, this.pitch - e.movementY * 0.0022));
+        this.updateFPSCamera();
+      }
     });
 
-    window.addEventListener('mouseup', () => {
-      this.isDragging = false;
+    // 鼠标按键
+    dom.addEventListener('mousedown', (e) => {
+      if (e.button === 0) {
+        this.handleLeftClick();
+      } else if (e.button === 2) {
+        e.preventDefault();
+        this.handleRightClick();
+      }
     });
 
-    dom.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      this.cameraAngle.radius = Math.max(0.65, Math.min(3.5, this.cameraAngle.radius + e.deltaY * 0.002));
-      this.updateCameraPosition();
-    }, { passive: false });
+    dom.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // 键盘 WASD 移动
+    window.addEventListener('keydown', (e) => {
+      if (this.mode === 'fps') {
+        this.keysPressed.add(e.code);
+
+        // 按 E 快捷捡起武器
+        if (e.code === 'KeyE') {
+          if (!this.isHoldingWeapon && this.currentInteractTarget === 'weapon') {
+            this.pickupWeapon();
+          } else if (this.currentInteractTarget === 'anvil' && this.currentBlueprint) {
+            this.enterForgingMode(this.currentBlueprint);
+          }
+        }
+
+        // 按 G 快捷丢下武器
+        if (e.code === 'KeyG' && this.isHoldingWeapon) {
+          this.dropWeapon(false);
+        }
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      this.keysPressed.delete(e.code);
+    });
 
     window.addEventListener('resize', this.handleResize);
   }
@@ -901,7 +1060,7 @@ export class ForgeScene3D {
     this.renderer.setSize(width, height);
   };
 
-  // ==================== 渲染主循环 ====================
+  // ==================== 渲染与物理主循环 ====================
   private startRenderLoop() {
     let clock = new THREE.Clock();
 
@@ -909,23 +1068,46 @@ export class ForgeScene3D {
       const delta = clock.getDelta();
       const elapsedTime = clock.getElapsedTime();
 
-      // 全息虚线框自转微浮动
-      if (this.ghostBlueprintGroup) {
-        this.ghostBlueprintGroup.position.y = 0.015 + Math.sin(elapsedTime * 2.5) * 0.003;
+      // 1. 第一人称移动 (WASD)
+      if (this.mode === 'fps') {
+        const moveSpeed = 3.2 * delta;
+        const fwd = this.getCameraForwardFlat();
+        const right = this.getCameraRightFlat();
+        const moveDelta = new THREE.Vector3();
+
+        if (this.keysPressed.has('KeyW')) moveDelta.add(fwd);
+        if (this.keysPressed.has('KeyS')) moveDelta.sub(fwd);
+        if (this.keysPressed.has('KeyD')) moveDelta.add(right);
+        if (this.keysPressed.has('KeyA')) moveDelta.sub(right);
+
+        if (moveDelta.lengthSq() > 0) {
+          moveDelta.normalize().multiplyScalar(moveSpeed);
+          this.playerPos.add(moveDelta);
+
+          // 圆形工坊围栏碰撞边界
+          const distFromCenter = Math.sqrt(this.playerPos.x * this.playerPos.x + this.playerPos.z * this.playerPos.z);
+          if (distFromCenter > 4.2) {
+            this.playerPos.x = (this.playerPos.x / distFromCenter) * 4.2;
+            this.playerPos.z = (this.playerPos.z / distFromCenter) * 4.2;
+          }
+
+          // 走路轻微视线与手部颠簸 (Headbob & Weapon sway)
+          const bob = Math.sin(elapsedTime * 10) * 0.008;
+          this.playerPos.y = 1.45 + Math.abs(bob);
+
+          if (this.isHoldingWeapon && !this.isSlashing) {
+            this.heldWeaponViewmodelGroup.position.y = -0.25 + bob * 0.8;
+            this.heldWeaponViewmodelGroup.position.x = 0.26 + Math.cos(elapsedTime * 5) * 0.005;
+          }
+        }
+
+        this.updateFPSCamera();
+
+        // 2. 准星射线检测交互物 (Raycast interaction)
+        this.updateCrosshairRaycast();
       }
 
-      // 粗胚呼吸热度
-      if (this.hotBilletMesh && this.workpieceGroup.visible) {
-        const mat = this.hotBilletMesh.material as THREE.MeshStandardMaterial;
-        mat.emissiveIntensity = 2.4 + Math.sin(elapsedTime * 4) * 0.4;
-      }
-
-      // 炉火跳动
-      if (this.fireLight) {
-        this.fireLight.intensity = this.fireLight.intensity * (0.95 + Math.sin(elapsedTime * 9) * 0.05);
-      }
-
-      // 火花粒子物理更新
+      // 3. 粒子系统更新
       if (this.sparkParticles && (this.sparkParticles.material as THREE.PointsMaterial).opacity > 0) {
         const positions = this.sparkParticles.geometry.attributes.position.array as Float32Array;
         for (let i = 0; i < this.sparkVelocities.length; i++) {
@@ -939,7 +1121,6 @@ export class ForgeScene3D {
         this.sparkParticles.geometry.attributes.position.needsUpdate = true;
       }
 
-      // 蒸汽粒子物理更新
       if (this.steamParticles && (this.steamParticles.material as THREE.PointsMaterial).opacity > 0) {
         const positions = this.steamParticles.geometry.attributes.position.array as Float32Array;
         for (let i = 0; i < this.steamVelocities.length; i++) {
@@ -956,6 +1137,61 @@ export class ForgeScene3D {
     };
 
     this.animationFrameId = requestAnimationFrame(loop);
+  }
+
+  /**
+   * 射线检测中心十字准星所指向的对象
+   */
+  private updateCrosshairRaycast() {
+    this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+
+    const checkObjects: THREE.Object3D[] = [];
+    if (this.anvilGroup) checkObjects.push(this.anvilGroup);
+    if (this.weaponGroup && this.weaponGroup.visible) checkObjects.push(this.weaponGroup);
+    if (this.dummyGroup) checkObjects.push(this.dummyGroup);
+
+    const intersects = this.raycaster.intersectObjects(checkObjects, true);
+
+    let newTarget: 'anvil' | 'weapon' | 'dummy' | null = null;
+    let promptText: string | null = null;
+
+    if (intersects.length > 0) {
+      const firstHit = intersects[0];
+      if (firstHit.distance < 3.2) {
+        let cur: THREE.Object3D | null = firstHit.object;
+        while (cur && cur.parent && cur !== this.scene) {
+          if (cur === this.anvilGroup) {
+            newTarget = 'anvil';
+            break;
+          }
+          if (cur === this.weaponGroup) {
+            newTarget = 'weapon';
+            break;
+          }
+          if (cur === this.dummyGroup) {
+            newTarget = 'dummy';
+            break;
+          }
+          cur = cur.parent;
+        }
+      }
+    }
+
+    this.currentInteractTarget = newTarget;
+
+    if (newTarget === 'anvil') {
+      promptText = '⚒️ [左键点击铁砧] 切换打铁视角';
+    } else if (newTarget === 'weapon' && !this.isHoldingWeapon) {
+      promptText = `✋ [左键] 拾起 ${this.currentBlueprint?.name || '武器'}`;
+    } else if (newTarget === 'dummy' && this.isHoldingWeapon) {
+      promptText = '⚔️ [左键] 挥击木桩假人';
+    } else if (this.isHoldingWeapon) {
+      promptText = '⚔️ [左键] 挥砍 | 🖐️ [右键] 松手扔掉武器';
+    }
+
+    if (this.onPromptChange) {
+      this.onPromptChange(promptText);
+    }
   }
 
   public destroy() {
