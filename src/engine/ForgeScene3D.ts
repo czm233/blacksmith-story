@@ -302,12 +302,12 @@ export class ForgeScene3D {
     this.scene.add(this.dummyGroup);
   }
 
-  // ==================== 右手持锤系统 (右手臂 + 拳套 + 锻造方锤) ====================
+  // ==================== 右手持锤系统 (右手臂 + 拳套 + 锻造方锤，位于视野右侧) ====================
   private buildRightArmAndHammer() {
     this.rightArmGroup = new THREE.Group();
     this.rightArmGroup.name = 'RightArmAndHammer';
 
-    // 1. 小臂 (皮护腕工匠手臂)
+    // 1. 小臂 (皮护腕工匠手臂，从画面右侧进入: Z < 0 为屏幕右侧)
     const forearmGeo = new THREE.CylinderGeometry(0.036, 0.046, 0.32, 12);
     const armMat = new THREE.MeshStandardMaterial({
       color: 0x482b18,
@@ -316,8 +316,8 @@ export class ForgeScene3D {
     });
     const forearm = new THREE.Mesh(forearmGeo, armMat);
     forearm.rotation.z = Math.PI / 3;
-    forearm.rotation.y = -Math.PI / 6;
-    forearm.position.set(0.16, -0.06, 0.08);
+    forearm.rotation.y = Math.PI / 6;
+    forearm.position.set(0.16, -0.06, -0.08);
     this.rightArmGroup.add(forearm);
 
     // 2. 握持铁锤的手部拳套 (Gloved Fist)
@@ -328,16 +328,16 @@ export class ForgeScene3D {
       metalness: 0.15
     });
     const fist = new THREE.Mesh(fistGeo, fistMat);
-    fist.position.set(0.04, 0.02, 0.02);
+    fist.position.set(0.04, 0.02, -0.02);
     this.rightArmGroup.add(fist);
 
     // 3. 锤柄 (白蜡木坚韧长柄，被拳头紧握)
     const handleGeo = new THREE.CylinderGeometry(0.015, 0.017, 0.44, 10);
     const handleMat = new THREE.MeshStandardMaterial({ color: 0x854d0e, roughness: 0.75 });
     const handle = new THREE.Mesh(handleGeo, handleMat);
-    handle.rotation.x = Math.PI / 4;
+    handle.rotation.x = -Math.PI / 4;
     handle.rotation.z = -Math.PI / 12;
-    handle.position.set(0.04, 0.06, 0.04);
+    handle.position.set(0.04, 0.06, -0.04);
     this.rightArmGroup.add(handle);
 
     // 4. 重型精铸方锤头 (Hammerhead)
@@ -349,12 +349,12 @@ export class ForgeScene3D {
     });
     this.hammerHeadMesh = new THREE.Mesh(headGeo, headMat);
     this.hammerHeadMesh.castShadow = true;
-    this.hammerHeadMesh.position.set(0.04, 0.22, 0.15);
+    this.hammerHeadMesh.position.set(0.04, 0.22, -0.15);
     this.rightArmGroup.add(this.hammerHeadMesh);
 
-    // 待命准备姿态：位于视线右前方，斜向上举起
-    this.rightArmGroup.position.set(0.24, 0.22, 0.18);
-    this.rightArmGroup.rotation.set(-0.3, 0.35, 0.25);
+    // 待命准备姿态：位于视线【右侧】(Z = -0.22 为屏幕右侧)，斜向上高举蓄势
+    this.rightArmGroup.position.set(0.24, 0.22, -0.22);
+    this.rightArmGroup.rotation.set(0.3, 0.35, -0.25);
     this.scene.add(this.rightArmGroup);
   }
 
@@ -554,9 +554,9 @@ export class ForgeScene3D {
       }
     });
 
-    // ★ 关键需求：武器横着放在铁砧上 (旋转 90 度躺平)
-    this.ghostBlueprintGroup.rotation.set(Math.PI / 2, 0, 0);
-    this.ghostBlueprintGroup.position.set(0, 0.015, -0.15);
+    // ★ 关键需求：武器横着放在铁砧上，手柄在左侧 (+Z 为屏幕左侧)，剑刃向右侧 (-Z 为屏幕右侧) 延展
+    this.ghostBlueprintGroup.rotation.set(-Math.PI / 2, 0, 0);
+    this.ghostBlueprintGroup.position.set(0, 0.015, 0.15);
     this.ghostBlueprintGroup.scale.set(0.9, 0.9, 0.9);
     this.scene.add(this.ghostBlueprintGroup);
 
@@ -634,10 +634,9 @@ export class ForgeScene3D {
 
     this.weaponGroup = this.assembler.assembleWeapon(blueprint, slotMaterials, this.showSockets);
 
-    // ★ 关键需求：武器横着放在铁砧上！
-    // 旋转 90 度使剑身沿 Z 轴横向平铺，剑刃躺在砧面 (y = -0.015m)
-    this.weaponGroup.rotation.set(Math.PI / 2, 0, 0);
-    this.weaponGroup.position.set(0, -0.015, -0.15);
+    // ★ 关键需求：武器横着放在铁砧上，手柄在左侧 (+Z 为屏幕左侧)，剑尖向右侧 (-Z 为屏幕右侧)
+    this.weaponGroup.rotation.set(-Math.PI / 2, 0, 0);
+    this.weaponGroup.position.set(0, -0.015, 0.15);
     this.scene.add(this.weaponGroup);
 
     // 轻微进场弹力
@@ -664,9 +663,10 @@ export class ForgeScene3D {
     if (this.isHammerStriking) return;
     this.isHammerStriking = true;
 
-    const anvilHitPos = new THREE.Vector3(0, -0.01, 0.05);
+    // 命中工作面中央 (Z ≈ -0.02 为偏向右侧剑身粗胚区)
+    const anvilHitPos = new THREE.Vector3(0, -0.01, -0.02);
 
-    // 右手持锤挥砸动作
+    // 右手持锤由右侧 (-Z 为屏幕右侧) 向下挥砸
     gsap.timeline({
       onComplete: () => {
         this.isHammerStriking = false;
@@ -675,7 +675,7 @@ export class ForgeScene3D {
     .to(this.rightArmGroup.position, {
       x: 0.08,
       y: 0.06,
-      z: 0.06,
+      z: -0.06,
       duration: 0.07,
       ease: 'power4.in',
       onComplete: () => {
@@ -697,24 +697,24 @@ export class ForgeScene3D {
       }
     })
     .to(this.rightArmGroup.rotation, {
-      x: 0.15,
+      x: -0.15,
       y: 0.12,
-      z: -0.15,
+      z: 0.15,
       duration: 0.07,
       ease: 'power4.in'
     }, '<')
-    // 砸中后回弹就位
+    // 砸中后回弹就位到右侧蓄势位 (Z = -0.22 为屏幕右侧)
     .to(this.rightArmGroup.position, {
       x: 0.24,
       y: 0.22,
-      z: 0.18,
+      z: -0.22,
       duration: 0.13,
       ease: 'power2.out'
     }, '+=0.02')
     .to(this.rightArmGroup.rotation, {
-      x: -0.3,
+      x: 0.3,
       y: 0.35,
-      z: 0.25,
+      z: -0.25,
       duration: 0.13,
       ease: 'power2.out'
     }, '<');
@@ -838,10 +838,10 @@ export class ForgeScene3D {
     let targetZ = 0.02;
 
     if (part === 'blade') {
-      targetZ = 0.18; // 剑身位于 +Z 方向
+      targetZ = -0.18; // 剑尖与剑身位于 -Z 方向 (屏幕右侧)
       targetRadius = 0.75;
     } else if (part === 'guard') {
-      targetZ = -0.08; // 护手位于近握柄端
+      targetZ = 0.08; // 护手与手柄握把位于 +Z 方向 (屏幕左侧)
       targetRadius = 0.65;
     }
 
