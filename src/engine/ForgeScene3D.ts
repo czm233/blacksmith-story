@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import gsap from 'gsap';
 import { WeaponAssembler } from './WeaponAssembler';
-import { BlueprintDef, MaterialDef, SlotType } from '../types/game';
+import { BlueprintDef, LightingConfig, MaterialDef, SlotType } from '../types/game';
+import { DEFAULT_LIGHTING_CONFIG, MATERIALS } from '../data/constants';
 import { sound } from '../utils/audio';
 
 export interface DamageNumber {
@@ -22,33 +23,52 @@ export class ForgeScene3D {
 
   // 场景物体
   private weaponGroup: THREE.Group | null = null;
+  private workpieceGroup: THREE.Group = new THREE.Group();
+  private hotBilletMesh: THREE.Mesh | null = null;
+  private ghostBlueprintGroup: THREE.Group | null = null;
+
   private anvilGroup: THREE.Group = new THREE.Group();
   private dummyGroup: THREE.Group = new THREE.Group();
   private hammerMesh: THREE.Group = new THREE.Group();
   private sparkParticles: THREE.Points | null = null;
   private sparkPositions: Float32Array = new Float32Array(300);
   private sparkVelocities: THREE.Vector3[] = [];
-  private fireLight: THREE.PointLight | null = null;
 
-  // 交互控制状态
+  // 蒸汽淬火粒子系统
+  private steamParticles: THREE.Points | null = null;
+  private steamPositions: Float32Array = new Float32Array(150);
+  private steamVelocities: THREE.Vector3[] = [];
+
+  // 灯光系统实例
+  private ambientLight!: THREE.AmbientLight;
+  private spotLight!: THREE.SpotLight;
+  private rimLight!: THREE.DirectionalLight;
+  private fireLight!: THREE.PointLight;
+  private fillLight!: THREE.DirectionalLight;
+
+  // 交互与视角状态
   private isDragging: boolean = false;
   private previousMousePosition = { x: 0, y: 0 };
   private cameraAngle = { theta: 0.35, phi: 1.25, radius: 2.8 };
+  private cameraLookTarget = new THREE.Vector3(0.3, 0.35, 0);
   public autoRotate: boolean = true;
   private showSockets: boolean = false;
   private animationFrameId: number | null = null;
 
+  // 打击冷却与连击控制
+  private isHammerStriking: boolean = false;
+
   // 回调
   private onDamagePopup: ((dmg: DamageNumber) => void) | null = null;
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, initialLighting: LightingConfig = DEFAULT_LIGHTING_CONFIG) {
     this.container = container;
     this.assembler = new WeaponAssembler();
 
     // 1. 初始化场景
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x0e0e14);
-    this.scene.fog = new THREE.FogExp2(0x0e0e14, 0.15);
+    this.scene.background = new THREE.Color(0x13131c);
+    this.scene.fog = new THREE.FogExp2(0x13131c, 0.08);
 
     // 2. 初始化相机
     const aspect = container.clientWidth / (container.clientHeight || 1);
@@ -62,16 +82,18 @@ export class ForgeScene3D {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.toneMappingExposure = initialLighting.exposure;
     container.appendChild(this.renderer.domElement);
 
     // 4. 构建环境灯光与道具
-    this.setupLighting();
+    this.setupLighting(initialLighting);
     this.buildWorkshopEnvironment();
     this.buildAnvil();
+    this.buildWorkpieceElements();
     this.buildTrainingDummy();
     this.buildHammer();
     this.setupSparkParticleSystem();
+    this.setupSteamParticleSystem();
 
     // 5. 事件监听
     this.setupEventListeners();
@@ -82,32 +104,57 @@ export class ForgeScene3D {
     this.onDamagePopup = cb;
   }
 
-  // ==================== 灯光系统 ====================
-  private setupLighting() {
-    // 环境底光 (深青蓝调)
-    const ambientLight = new THREE.AmbientLight(0x1a202c, 1.4);
-    this.scene.add(ambientLight);
+  // ==================== 灯光系统与实时调节 ====================
+  private setupLighting(config: LightingConfig) {
+    // 1. 环境底光
+    this.ambientLight = new THREE.AmbientLight(0xfff8ee, config.ambientIntensity);
+    this.scene.add(this.ambientLight);
 
-    // 暖炉火光 (跳动的暖橙色点光源)
-    this.fireLight = new THREE.PointLight(0xff7722, 4.0, 8);
+    // 2. 暖炉火光
+    this.fireLight = new THREE.PointLight(0xff7722, config.fireIntensity, 10);
     this.fireLight.position.set(-1.2, 0.4, -0.6);
     this.fireLight.castShadow = true;
     this.scene.add(this.fireLight);
 
-    // 主顶光 (聚光灯射向中央铁砧)
-    const spotLight = new THREE.SpotLight(0xfff5e6, 3.5);
-    spotLight.position.set(0.5, 4.0, 1.8);
-    spotLight.angle = Math.PI / 4;
-    spotLight.penumbra = 0.4;
-    spotLight.castShadow = true;
-    spotLight.shadow.mapSize.width = 1024;
-    spotLight.shadow.mapSize.height = 1024;
-    this.scene.add(spotLight);
+    // 3. 主聚光灯射向铁砧
+    this.spotLight = new THREE.SpotLight(0xfff2df, config.spotIntensity);
+    this.spotLight.position.set(0.6, 4.2, 1.8);
+    this.spotLight.angle = Math.PI / 3.8;
+    this.spotLight.penumbra = 0.35;
+    this.spotLight.castShadow = true;
+    this.spotLight.shadow.mapSize.width = 1024;
+    this.spotLight.shadow.mapSize.height = 1024;
+    this.scene.add(this.spotLight);
 
-    // 冷白轮廓光 (给刀刃提供金属镜面反光)
-    const rimLight = new THREE.DirectionalLight(0x90cdf4, 2.0);
-    rimLight.position.set(-2, 3, -2);
-    this.scene.add(rimLight);
+    // 4. 金属反光冷色轮廓光
+    this.rimLight = new THREE.DirectionalLight(0x93c5fd, config.rimIntensity);
+    this.rimLight.position.set(-2.5, 3.2, -2.5);
+    this.scene.add(this.rimLight);
+
+    // 5. 补充漫射正前方填充光
+    this.fillLight = new THREE.DirectionalLight(0xffeedd, 1.2);
+    this.fillLight.position.set(2, 2.5, 2.5);
+    this.scene.add(this.fillLight);
+  }
+
+  /**
+   * 动态应用用户自定义的光照与环境参数
+   */
+  public applyLighting(config: LightingConfig) {
+    if (this.ambientLight) this.ambientLight.intensity = config.ambientIntensity;
+    if (this.spotLight) this.spotLight.intensity = config.spotIntensity;
+    if (this.fireLight) this.fireLight.intensity = config.fireIntensity;
+    if (this.rimLight) this.rimLight.intensity = config.rimIntensity;
+    if (this.renderer) this.renderer.toneMappingExposure = config.exposure;
+
+    // 背景明暗调节
+    const bgVal = Math.max(0.04, 0.16 * (1 - config.bgDarkness * 0.7));
+    const bgColor = new THREE.Color(bgVal, bgVal * 1.05, bgVal * 1.3);
+    this.scene.background = bgColor;
+    if (this.scene.fog) {
+      (this.scene.fog as THREE.FogExp2).color = bgColor;
+      (this.scene.fog as THREE.FogExp2).density = 0.05 + config.bgDarkness * 0.1;
+    }
   }
 
   // ==================== 工坊环境 ====================
@@ -115,9 +162,9 @@ export class ForgeScene3D {
     // 地面石砖
     const floorGeo = new THREE.CylinderGeometry(5.0, 5.0, 0.2, 32);
     const floorMat = new THREE.MeshStandardMaterial({
-      color: 0x181822,
-      roughness: 0.9,
-      metalness: 0.1
+      color: 0x1c1c28,
+      roughness: 0.85,
+      metalness: 0.15,
     });
     const floor = new THREE.Mesh(floorGeo, floorMat);
     floor.position.y = -0.7;
@@ -129,7 +176,7 @@ export class ForgeScene3D {
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0xf59e0b,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.45,
       side: THREE.DoubleSide
     });
     const ring = new THREE.Mesh(ringGeo, ringMat);
@@ -145,21 +192,21 @@ export class ForgeScene3D {
 
     // 垫木桩底座
     const stumpGeo = new THREE.CylinderGeometry(0.38, 0.42, 0.4, 16);
-    const stumpMat = new THREE.MeshStandardMaterial({ color: 0x3d271d, roughness: 0.9, metalness: 0.05 });
+    const stumpMat = new THREE.MeshStandardMaterial({ color: 0x452b1f, roughness: 0.9, metalness: 0.05 });
     const stump = new THREE.Mesh(stumpGeo, stumpMat);
     stump.position.y = 0.2;
     stump.receiveShadow = true;
     this.anvilGroup.add(stump);
 
     // 铁砧主体 (铸铁质感)
-    const anvilMat = new THREE.MeshStandardMaterial({ color: 0x27272a, roughness: 0.4, metalness: 0.85 });
+    const anvilMat = new THREE.MeshStandardMaterial({ color: 0x2e3038, roughness: 0.35, metalness: 0.85 });
     const baseGeo = new THREE.BoxGeometry(0.32, 0.12, 0.5);
     const base = new THREE.Mesh(baseGeo, anvilMat);
     base.position.y = 0.46;
     base.castShadow = true;
     this.anvilGroup.add(base);
 
-    // 砧面 (工作台面)
+    // 砧面 (工作台面，高约 -0.02m)
     const topGeo = new THREE.BoxGeometry(0.26, 0.08, 0.58);
     const top = new THREE.Mesh(topGeo, anvilMat);
     top.position.y = 0.54;
@@ -174,6 +221,41 @@ export class ForgeScene3D {
     this.anvilGroup.add(horn);
 
     this.scene.add(this.anvilGroup);
+  }
+
+  // ==================== 烧红粗胚与全息图纸 ====================
+  private buildWorkpieceElements() {
+    this.workpieceGroup = new THREE.Group();
+    this.workpieceGroup.name = 'WorkpieceGroup';
+    this.workpieceGroup.position.set(0, -0.03, 0);
+
+    // 1. 烧红的金属粗胚 (Hot Billet)
+    const billetGeo = new THREE.BoxGeometry(0.08, 0.035, 0.32);
+    const billetMat = new THREE.MeshStandardMaterial({
+      color: 0x991b1b,
+      roughness: 0.3,
+      metalness: 0.8,
+      emissive: 0xff3b00,
+      emissiveIntensity: 2.5,
+    });
+    this.hotBilletMesh = new THREE.Mesh(billetGeo, billetMat);
+    this.hotBilletMesh.castShadow = true;
+    this.workpieceGroup.add(this.hotBilletMesh);
+
+    // 2. 粗胚底下炽热受热微光
+    const glowGeo = new THREE.PlaneGeometry(0.2, 0.4);
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: 0xff5500,
+      transparent: true,
+      opacity: 0.4,
+      side: THREE.DoubleSide
+    });
+    const glowPlane = new THREE.Mesh(glowGeo, glowMat);
+    glowPlane.rotation.x = -Math.PI / 2;
+    glowPlane.position.y = 0.005;
+    this.workpieceGroup.add(glowPlane);
+
+    this.scene.add(this.workpieceGroup);
   }
 
   // ==================== 试刀木桩假人 ====================
@@ -245,19 +327,19 @@ export class ForgeScene3D {
 
     // 锤头 (重型锻造方锤)
     const headGeo = new THREE.BoxGeometry(0.12, 0.1, 0.18);
-    const headMat = new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.35, metalness: 0.9 });
+    const headMat = new THREE.MeshStandardMaterial({ color: 0x22262d, roughness: 0.35, metalness: 0.9 });
     const head = new THREE.Mesh(headGeo, headMat);
     head.position.set(0, 0.48, 0);
     head.castShadow = true;
     this.hammerMesh.add(head);
 
-    // 初始位置：隐藏在铁砧斜上方待命
-    this.hammerMesh.position.set(0.4, 0.4, 0.3);
-    this.hammerMesh.rotation.set(-0.4, 0.2, 0.7);
+    // 初始待命位置 (铁砧上方就位)
+    this.hammerMesh.position.set(0.25, 0.45, 0.15);
+    this.hammerMesh.rotation.set(-0.35, 0.15, 0.55);
     this.scene.add(this.hammerMesh);
   }
 
-  // ==================== 火花粒子系统 ====================
+  // ==================== 火花与蒸汽粒子系统 ====================
   private setupSparkParticleSystem() {
     const count = 100;
     this.sparkPositions = new Float32Array(count * 3);
@@ -268,7 +350,7 @@ export class ForgeScene3D {
 
     const mat = new THREE.PointsMaterial({
       color: 0xffaa22,
-      size: 0.04,
+      size: 0.045,
       transparent: true,
       opacity: 0,
       blending: THREE.AdditiveBlending
@@ -282,10 +364,34 @@ export class ForgeScene3D {
     }
   }
 
+  private setupSteamParticleSystem() {
+    const count = 50;
+    this.steamPositions = new Float32Array(count * 3);
+    this.steamVelocities = [];
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(this.steamPositions, 3));
+
+    const mat = new THREE.PointsMaterial({
+      color: 0xddeeff,
+      size: 0.12,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.NormalBlending
+    });
+
+    this.steamParticles = new THREE.Points(geo, mat);
+    this.scene.add(this.steamParticles);
+
+    for (let i = 0; i < count; i++) {
+      this.steamVelocities.push(new THREE.Vector3());
+    }
+  }
+
   /**
    * 触发火花飞溅爆发
    */
-  public triggerSparkBurst(origin: THREE.Vector3, count: number = 60, colorHex: number = 0xffaa22) {
+  public triggerSparkBurst(origin: THREE.Vector3, count: number = 50, colorHex: number = 0xffaa22) {
     if (!this.sparkParticles) return;
 
     const positions = this.sparkParticles.geometry.attributes.position.array as Float32Array;
@@ -297,10 +403,9 @@ export class ForgeScene3D {
       positions[i * 3 + 1] = origin.y;
       positions[i * 3 + 2] = origin.z;
 
-      // 向上半球散射的高初速
       const theta = Math.random() * Math.PI * 2;
-      const phi = Math.random() * (Math.PI / 2.2);
-      const speed = 1.5 + Math.random() * 2.5;
+      const phi = Math.random() * (Math.PI / 2.1);
+      const speed = 1.6 + Math.random() * 2.8;
 
       this.sparkVelocities[i].set(
         Math.sin(phi) * Math.cos(theta) * speed,
@@ -311,43 +416,220 @@ export class ForgeScene3D {
 
     this.sparkParticles.geometry.attributes.position.needsUpdate = true;
 
-    // 粒子渐隐动画
     gsap.to(this.sparkParticles.material, {
       opacity: 0,
-      duration: 0.45,
+      duration: 0.4,
       ease: 'power2.out'
     });
   }
 
-  // ==================== 武器装配与呈现 ====================
-  public displayWeapon(blueprint: BlueprintDef, slotMaterials: Partial<Record<SlotType, MaterialDef>> = {}) {
-    // 移除旧武器
+  /**
+   * 触发淬火白雾蒸汽
+   */
+  public triggerSteamBurst(origin: THREE.Vector3) {
+    if (!this.steamParticles) return;
+
+    const positions = this.steamParticles.geometry.attributes.position.array as Float32Array;
+    (this.steamParticles.material as THREE.PointsMaterial).opacity = 0.85;
+
+    for (let i = 0; i < 50; i++) {
+      positions[i * 3] = origin.x + (Math.random() - 0.5) * 0.15;
+      positions[i * 3 + 1] = origin.y;
+      positions[i * 3 + 2] = origin.z + (Math.random() - 0.5) * 0.15;
+
+      this.steamVelocities[i].set(
+        (Math.random() - 0.5) * 0.4,
+        0.8 + Math.random() * 0.9,
+        (Math.random() - 0.5) * 0.4
+      );
+    }
+
+    this.steamParticles.geometry.attributes.position.needsUpdate = true;
+
+    gsap.to(this.steamParticles.material, {
+      opacity: 0,
+      duration: 1.1,
+      ease: 'power1.out'
+    });
+  }
+
+  // ==================== 打造聚焦与镜头切换 ====================
+
+  /**
+   * 打造开始：镜头聚焦特写到铁砧上方工作面
+   */
+  public focusAnvil() {
+    this.autoRotate = false;
+    gsap.to(this.cameraAngle, {
+      theta: 0.22,
+      phi: 0.95,
+      radius: 1.35,
+      duration: 0.75,
+      ease: 'power2.inOut',
+      onUpdate: () => this.updateCameraPosition()
+    });
+    gsap.to(this.cameraLookTarget, {
+      x: 0,
+      y: 0.02,
+      z: 0.05,
+      duration: 0.75,
+      ease: 'power2.inOut',
+      onUpdate: () => this.updateCameraPosition()
+    });
+  }
+
+  /**
+   * 打造完成或重置：镜头拉回全景展示位
+   */
+  public focusHeroPedestal() {
+    gsap.to(this.cameraAngle, {
+      theta: 0.35,
+      phi: 1.25,
+      radius: 2.8,
+      duration: 0.9,
+      ease: 'power2.out',
+      onUpdate: () => this.updateCameraPosition()
+    });
+    gsap.to(this.cameraLookTarget, {
+      x: 0.3,
+      y: 0.35,
+      z: 0,
+      duration: 0.9,
+      ease: 'power2.out',
+      onUpdate: () => this.updateCameraPosition(),
+      onComplete: () => {
+        this.autoRotate = true;
+      }
+    });
+  }
+
+  // ==================== 模版与渐进式锻造成型 ====================
+
+  /**
+   * 待锻造状态：仅显示烧红粗胚与半透明全息图纸线框
+   */
+  public displayWorkpieceTemplate(blueprint: BlueprintDef) {
+    // 隐藏/移除成品武器
     if (this.weaponGroup) {
       this.scene.remove(this.weaponGroup);
-      this.weaponGroup.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          child.geometry.dispose();
-        }
-      });
       this.weaponGroup = null;
     }
 
-    // 重新装配生成新武器
-    this.weaponGroup = this.assembler.assembleWeapon(blueprint, slotMaterials, this.showSockets);
+    // 显示烧红粗胚
+    this.workpieceGroup.visible = true;
+    if (this.hotBilletMesh) {
+      this.hotBilletMesh.scale.set(1, 1, 1);
+      (this.hotBilletMesh.material as THREE.MeshStandardMaterial).emissiveIntensity = 2.4;
+    }
 
-    // 悬浮在铁砧上方优雅展示
+    // 移除旧全息线框
+    if (this.ghostBlueprintGroup) {
+      this.scene.remove(this.ghostBlueprintGroup);
+      this.ghostBlueprintGroup = null;
+    }
+
+    // 生成全息图纸线框构架 (Blueprint Scaffold Ghost)
+    this.ghostBlueprintGroup = this.assembler.assembleWeapon(blueprint, {}, true);
+    this.ghostBlueprintGroup.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.material = new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.35
+        });
+      }
+    });
+    this.ghostBlueprintGroup.position.set(0, 0.36, 0);
+    this.ghostBlueprintGroup.scale.set(0.85, 0.85, 0.85);
+    this.scene.add(this.ghostBlueprintGroup);
+  }
+
+  /**
+   * 打造过程中动态更新（进度 0% ~ 100%）：
+   * 粗胚逐渐变形延展，全息线框逐渐充实为炽热真刃并逐步褪火降温！
+   */
+  public updateForgingProgress(progress: number, blueprint: BlueprintDef) {
+    const p = Math.max(0, Math.min(1, progress));
+
+    // 1. 粗胚逐步砸扁延展并融入
+    if (this.hotBilletMesh) {
+      const sx = 1 + p * 0.8;
+      const sy = Math.max(0.2, 1 - p * 0.7);
+      const sz = 1 + p * 1.6;
+      this.hotBilletMesh.scale.set(sx, sy, sz);
+
+      const mat = this.hotBilletMesh.material as THREE.MeshStandardMaterial;
+      // 随着进度上升，粗胚光度与颜色从赤橙向淬火红转变
+      mat.emissive.setHex(p > 0.8 ? 0xd97706 : 0xff3b00);
+      mat.emissiveIntensity = 2.5 + Math.sin(Date.now() * 0.01) * 0.5;
+    }
+
+    // 2. 全息线框逐渐凝实为实体武器 (半显现)
+    if (this.ghostBlueprintGroup) {
+      const ghostOpacity = Math.max(0.1, 0.4 * (1 - p * 0.6));
+      this.ghostBlueprintGroup.traverse((child) => {
+        if (child instanceof THREE.Mesh && child.material) {
+          (child.material as THREE.MeshBasicMaterial).opacity = ghostOpacity;
+          // 颜色从蓝图青向锻造金黄转变
+          if (p > 0.5) {
+            (child.material as THREE.MeshBasicMaterial).color.setHex(0xf59e0b);
+          }
+        }
+      });
+      // 线框位置微降至铁砧表面
+      this.ghostBlueprintGroup.position.y = 0.36 - p * 0.18;
+    }
+  }
+
+  /**
+   * 打造大功告成：淬火升腾白雾，真容展露！
+   */
+  public quenchAndReveal(blueprint: BlueprintDef, slotMaterials: Partial<Record<SlotType, MaterialDef>> = {}) {
+    // 隐藏粗胚与全息线框
+    this.workpieceGroup.visible = false;
+    if (this.ghostBlueprintGroup) {
+      this.scene.remove(this.ghostBlueprintGroup);
+      this.ghostBlueprintGroup = null;
+    }
+
+    // 播放淬火白雾
+    sound.playQuenchSteam();
+    this.triggerSteamBurst(new THREE.Vector3(0, -0.02, 0));
+    this.triggerSparkBurst(new THREE.Vector3(0, 0.05, 0), 40, 0xffffff);
+
+    // 展露真正的成品武器
+    this.displayWeapon(blueprint, slotMaterials);
+
+    // 镜头优雅平滑拉回到全景
+    this.focusHeroPedestal();
+  }
+
+  // ==================== 武器装配与呈现 (成品态) ====================
+  public displayWeapon(blueprint: BlueprintDef, slotMaterials: Partial<Record<SlotType, MaterialDef>> = {}) {
+    this.workpieceGroup.visible = false;
+    if (this.ghostBlueprintGroup) {
+      this.scene.remove(this.ghostBlueprintGroup);
+      this.ghostBlueprintGroup = null;
+    }
+
+    if (this.weaponGroup) {
+      this.scene.remove(this.weaponGroup);
+      this.weaponGroup = null;
+    }
+
+    this.weaponGroup = this.assembler.assembleWeapon(blueprint, slotMaterials, this.showSockets);
     this.weaponGroup.position.set(0, 0.4, 0);
     this.weaponGroup.rotation.set(0, 0, 0);
     this.scene.add(this.weaponGroup);
 
-    // 进场微弹簧动画
     this.weaponGroup.scale.set(0.1, 0.1, 0.1);
     gsap.to(this.weaponGroup.scale, {
       x: 1,
       y: 1,
       z: 1,
-      duration: 0.6,
-      ease: 'back.out(1.7)'
+      duration: 0.65,
+      ease: 'back.out(1.8)'
     });
   }
 
@@ -355,74 +637,55 @@ export class ForgeScene3D {
     this.showSockets = !this.showSockets;
   }
 
-  // ==================== 🔨 敲击锻造动画 ====================
-  public animateHammerStrike(isPerfect: boolean = false): Promise<void> {
-    return new Promise((resolve) => {
-      // 锤子蓄力高举并狠狠砸向铁砧
-      const anvilHitPos = new THREE.Vector3(0, 0.05, 0.05);
+  // ==================== 🔨 实时鼠标挥锤敲打与微震 ====================
 
-      const tl = gsap.timeline({
-        onComplete: () => {
-          resolve();
+  /**
+   * 每次鼠标点击打铁：铁锤闪电下砸 + 顿帧火花 + 镜头微震
+   */
+  public triggerHammerTap(isPerfect: boolean = false) {
+    if (this.isHammerStriking) return;
+    this.isHammerStriking = true;
+
+    const anvilHitPos = new THREE.Vector3(0, -0.02, 0.02);
+
+    // 锤头迅速砸下
+    gsap.timeline({
+      onComplete: () => {
+        this.isHammerStriking = false;
+      }
+    })
+    .to(this.hammerMesh.position, {
+      x: 0.02,
+      y: 0.02,
+      z: 0.02,
+      duration: 0.06,
+      ease: 'power4.in',
+      onComplete: () => {
+        // 瞬间：火花爆发 + 砧面高热闪光 + 镜头抖动
+        this.triggerSparkBurst(anvilHitPos, isPerfect ? 60 : 35, isPerfect ? 0xffea00 : 0xff6600);
+
+        // 粗胚受力微颤
+        if (this.hotBilletMesh) {
+          const mat = this.hotBilletMesh.material as THREE.MeshStandardMaterial;
+          mat.emissiveIntensity = 5.0;
+          gsap.to(mat, { emissiveIntensity: 2.5, duration: 0.2 });
         }
-      });
 
-      tl.to(this.hammerMesh.position, {
-        x: 0.1,
-        y: 0.9,
-        z: 0.2,
-        duration: 0.18,
-        ease: 'power1.out'
-      })
-      .to(this.hammerMesh.rotation, {
-        x: -0.8,
-        y: 0.1,
-        z: 0.2,
-        duration: 0.18,
-        ease: 'power1.out'
-      }, '<')
-      .to(this.hammerMesh.position, {
-        x: 0,
-        y: 0.08,
-        z: 0,
-        duration: 0.1,
-        ease: 'power4.in',
-        onComplete: () => {
-          // 砸击瞬间：音效 + 顿帧 + 火花
-          sound.playHammerHit(isPerfect);
-          this.triggerSparkBurst(anvilHitPos, isPerfect ? 80 : 45, isPerfect ? 0xffcc00 : 0xff7711);
-
-          // 砧面炽热反光
-          if (this.fireLight) {
-            const originalIntensity = this.fireLight.intensity;
-            this.fireLight.intensity = 8.0;
-            gsap.to(this.fireLight, { intensity: originalIntensity, duration: 0.3 });
-          }
-
-          // 武器微颤抖动
-          if (this.weaponGroup) {
-            gsap.fromTo(this.weaponGroup.position, 
-              { y: 0.38 }, 
-              { y: 0.4, duration: 0.2, ease: 'bounce.out' }
-            );
-          }
-        }
-      })
-      .to(this.hammerMesh.position, {
-        x: 0.4,
-        y: 0.4,
-        z: 0.3,
-        duration: 0.28,
-        ease: 'power2.out'
-      }, '+=0.06')
-      .to(this.hammerMesh.rotation, {
-        x: -0.4,
-        y: 0.2,
-        z: 0.7,
-        duration: 0.28,
-        ease: 'power2.out'
-      }, '<');
-    });
+        // 镜头微震动 (Screen Shake)
+        const shakeIntensity = isPerfect ? 0.03 : 0.015;
+        gsap.fromTo(this.cameraLookTarget,
+          { y: 0.02 + (Math.random() - 0.5) * shakeIntensity },
+          { y: 0.02, duration: 0.12, ease: 'rough' }
+        );
+      }
+    })
+    .to(this.hammerMesh.position, {
+      x: 0.25,
+      y: 0.45,
+      z: 0.15,
+      duration: 0.12,
+      ease: 'power2.out'
+    }, '+=0.03');
   }
 
   // ==================== ⚔️ 试刀挥砍木桩动画 ====================
@@ -433,7 +696,6 @@ export class ForgeScene3D {
         return;
       }
 
-      // 试刀：武器平举，横切暴砍假人，然后回归原位
       const startPos = this.weaponGroup.position.clone();
       const startRot = this.weaponGroup.rotation.clone();
 
@@ -458,7 +720,7 @@ export class ForgeScene3D {
         duration: 0.18,
         ease: 'power2.out'
       }, '<')
-      // 2. 闪电斩向木桩 (高速横砍)
+      // 2. 闪电斩向木桩
       .to(this.weaponGroup.position, {
         x: 1.05,
         y: 0.35,
@@ -466,19 +728,17 @@ export class ForgeScene3D {
         duration: 0.1,
         ease: 'power3.in',
         onComplete: () => {
-          // 击中瞬间：音效 + 假人剧烈回弹 + 飞溅木屑 + 伤害跳字
           sound.playSlashHit(isCrit);
 
           const hitWorldPos = new THREE.Vector3(1.1, 0.4, -0.15);
           this.triggerSparkBurst(hitWorldPos, isCrit ? 70 : 35, isCrit ? 0xff4422 : 0xeab308);
 
-          // 假人受击晃动 (GSAP 弹性阻尼摆动)
+          // 假人受击弹性阻尼晃动
           gsap.fromTo(this.dummyGroup.rotation,
             { z: isCrit ? -0.45 : -0.25, x: 0.15 },
             { z: 0, x: 0, duration: 0.85, ease: 'elastic.out(1.2, 0.25)' }
           );
 
-          // 计算屏幕 2D 坐标以便跳出伤害数字
           if (this.onDamagePopup) {
             const screenPos = hitWorldPos.clone().project(this.camera);
             const halfWidth = this.container.clientWidth / 2;
@@ -497,7 +757,7 @@ export class ForgeScene3D {
           }
         }
       })
-      // 3. 挥砍后停滞收招并回位
+      // 3. 挥砍后回位
       .to(this.weaponGroup.position, {
         x: startPos.x,
         y: startPos.y,
@@ -515,13 +775,13 @@ export class ForgeScene3D {
     });
   }
 
-  // ==================== 相机与事件交互 ====================
+  // ==================== 相机更新与事件 ====================
   private updateCameraPosition() {
     const { theta, phi, radius } = this.cameraAngle;
-    this.camera.position.x = radius * Math.sin(phi) * Math.sin(theta);
-    this.camera.position.y = radius * Math.cos(phi) + 0.3;
-    this.camera.position.z = radius * Math.sin(phi) * Math.cos(theta);
-    this.camera.lookAt(0.3, 0.35, 0);
+    this.camera.position.x = this.cameraLookTarget.x + radius * Math.sin(phi) * Math.sin(theta);
+    this.camera.position.y = this.cameraLookTarget.y + radius * Math.cos(phi);
+    this.camera.position.z = this.cameraLookTarget.z + radius * Math.sin(phi) * Math.cos(theta);
+    this.camera.lookAt(this.cameraLookTarget);
   }
 
   public resetCamera() {
@@ -529,6 +789,13 @@ export class ForgeScene3D {
       theta: 0.35,
       phi: 1.25,
       radius: 2.8,
+      duration: 0.5,
+      onUpdate: () => this.updateCameraPosition()
+    });
+    gsap.to(this.cameraLookTarget, {
+      x: 0.3,
+      y: 0.35,
+      z: 0,
       duration: 0.5,
       onUpdate: () => this.updateCameraPosition()
     });
@@ -583,7 +850,7 @@ export class ForgeScene3D {
 
     dom.addEventListener('wheel', (e) => {
       e.preventDefault();
-      this.cameraAngle.radius = Math.max(1.1, Math.min(5.0, this.cameraAngle.radius + e.deltaY * 0.002));
+      this.cameraAngle.radius = Math.max(0.9, Math.min(5.0, this.cameraAngle.radius + e.deltaY * 0.002));
       this.updateCameraPosition();
     }, { passive: false });
 
@@ -615,12 +882,23 @@ export class ForgeScene3D {
         this.weaponGroup.position.y = 0.4 + Math.sin(elapsedTime * 2.5) * 0.015;
       }
 
-      // 炉火跳动模拟
-      if (this.fireLight) {
-        this.fireLight.intensity = 3.6 + Math.sin(elapsedTime * 9) * 0.4 + Math.cos(elapsedTime * 17) * 0.2;
+      // 全息图纸虚线框自转微浮动
+      if (this.ghostBlueprintGroup) {
+        this.ghostBlueprintGroup.rotation.y += delta * 0.35;
       }
 
-      // 粒子物理更新
+      // 粗胚呼吸热度
+      if (this.hotBilletMesh && this.workpieceGroup.visible) {
+        const mat = this.hotBilletMesh.material as THREE.MeshStandardMaterial;
+        mat.emissiveIntensity = 2.2 + Math.sin(elapsedTime * 4) * 0.4;
+      }
+
+      // 炉火跳动模拟
+      if (this.fireLight) {
+        this.fireLight.intensity = this.fireLight.intensity * (0.95 + Math.sin(elapsedTime * 9) * 0.05);
+      }
+
+      // 火花粒子物理更新
       if (this.sparkParticles && (this.sparkParticles.material as THREE.PointsMaterial).opacity > 0) {
         const positions = this.sparkParticles.geometry.attributes.position.array as Float32Array;
         for (let i = 0; i < this.sparkVelocities.length; i++) {
@@ -629,10 +907,21 @@ export class ForgeScene3D {
           positions[i * 3 + 1] += vel.y * delta;
           positions[i * 3 + 2] += vel.z * delta;
 
-          // 重力衰减
-          vel.y -= 7.0 * delta;
+          vel.y -= 7.5 * delta;
         }
         this.sparkParticles.geometry.attributes.position.needsUpdate = true;
+      }
+
+      // 蒸汽粒子物理更新
+      if (this.steamParticles && (this.steamParticles.material as THREE.PointsMaterial).opacity > 0) {
+        const positions = this.steamParticles.geometry.attributes.position.array as Float32Array;
+        for (let i = 0; i < this.steamVelocities.length; i++) {
+          const vel = this.steamVelocities[i];
+          positions[i * 3] += vel.x * delta;
+          positions[i * 3 + 1] += vel.y * delta;
+          positions[i * 3 + 2] += vel.z * delta;
+        }
+        this.steamParticles.geometry.attributes.position.needsUpdate = true;
       }
 
       this.renderer.render(this.scene, this.camera);

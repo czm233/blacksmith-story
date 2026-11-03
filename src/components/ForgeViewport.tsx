@@ -1,14 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { RotateCw, RefreshCw, Eye, Sparkles, Sword, Hammer, Check, ArrowLeft, Target } from 'lucide-react';
+import { RotateCw, RefreshCw, Eye, Sun, Sword, Hammer, Target, Sparkles, Layers } from 'lucide-react';
 import { ForgeScene3D, DamageNumber } from '../engine/ForgeScene3D';
-import { BlueprintDef, ForgedWeapon, MaterialId, QualityTier } from '../types/game';
+import { BlueprintDef, ForgedWeapon, LightingConfig, MaterialId } from '../types/game';
 import { MATERIALS, QUALITY_CONFIGS } from '../data/constants';
+import { StardewForgeMinigame } from './StardewForgeMinigame';
+import { LightingStudioModal } from './LightingStudioModal';
 import { sound } from '../utils/audio';
 
 interface ForgeViewportProps {
   blueprint: BlueprintDef;
   inventory: Record<MaterialId, number>;
   currentWeapon: ForgedWeapon | null;
+  lightingConfig: LightingConfig;
+  onUpdateLighting: (cfg: LightingConfig) => void;
   onStartForge: () => void;
   onFinishForge: (score: number) => void;
   onTestStrike: () => { damage: number; isCrit: boolean };
@@ -19,6 +23,8 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
   blueprint,
   inventory,
   currentWeapon,
+  lightingConfig,
+  onUpdateLighting,
   onStartForge,
   onFinishForge,
   onTestStrike,
@@ -31,19 +37,16 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
   const [autoRotate, setAutoRotate] = useState(true);
   const [showSockets, setShowSockets] = useState(false);
   const [damageNumbers, setDamageNumbers] = useState<DamageNumber[]>([]);
+  const [isLightingOpen, setIsLightingOpen] = useState(false);
 
   // 打铁小游戏状态
   const [isMinigameActive, setIsMinigameActive] = useState(false);
-  const [hitIndex, setHitIndex] = useState(0); // 0, 1, 2 (共 3 锤)
-  const [accumulatedScore, setAccumulatedScore] = useState(0);
-  const [indicatorPos, setIndicatorPos] = useState(50); // 0 ~ 100
-  const [hitFeedback, setHitFeedback] = useState<string | null>(null);
 
   // 1. 初始化 3D 场景
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const scene = new ForgeScene3D(containerRef.current);
+    const scene = new ForgeScene3D(containerRef.current, lightingConfig);
     sceneRef.current = scene;
 
     scene.setDamagePopupCallback((dmg) => {
@@ -59,50 +62,25 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
     };
   }, []);
 
-  // 2. 当图纸改变或成品生成时，更新 3D 展示
+  // 2. 实时同步光照参数变动
   useEffect(() => {
     if (sceneRef.current) {
-      sceneRef.current.displayWeapon(blueprint);
+      sceneRef.current.applyLighting(lightingConfig);
     }
-  }, [blueprint, currentWeapon]);
+  }, [lightingConfig]);
 
-  // 3. 打铁指针振荡动画
+  // 3. 核心机制：未打造完成前绝不提前画出武器！仅显示粗胚与全息线框！
   useEffect(() => {
-    if (!isMinigameActive) return;
+    if (!sceneRef.current) return;
 
-    let frameId: number;
-    let direction = 1;
-    let pos = 50;
-    const speed = 1.35; // 摆动速度
-
-    const animateGauge = () => {
-      pos += direction * speed;
-      if (pos >= 98) {
-        pos = 98;
-        direction = -1;
-      } else if (pos <= 2) {
-        pos = 2;
-        direction = 1;
-      }
-      setIndicatorPos(pos);
-      frameId = requestAnimationFrame(animateGauge);
-    };
-
-    frameId = requestAnimationFrame(animateGauge);
-    return () => cancelAnimationFrame(frameId);
-  }, [isMinigameActive]);
-
-  // 键盘空格键挥锤支持
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && isMinigameActive) {
-        e.preventDefault();
-        handleHammerStrike();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isMinigameActive, indicatorPos, accumulatedScore, hitIndex]);
+    if (currentWeapon) {
+      // 已经完成的武器：展示成品真容
+      sceneRef.current.displayWeapon(blueprint);
+    } else if (!isMinigameActive) {
+      // 待打造状态：仅展示烧红的金属粗胚与全息插槽树模板
+      sceneRef.current.displayWorkpieceTemplate(blueprint);
+    }
+  }, [blueprint, currentWeapon, isMinigameActive]);
 
   // 4. 检查原料是否齐备
   const missingMaterials: { id: MaterialId; needed: number; has: number }[] = [];
@@ -115,55 +93,34 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
     }
   }
 
-  // 触发单次挥锤敲打
-  const handleHammerStrike = async () => {
-    if (!isMinigameActive || !sceneRef.current) return;
-
-    // 计算本次击打精确度：指针中心在 50，距离越近分越高
-    const dist = Math.abs(indicatorPos - 50);
-    let strikeScore = 0;
-    let isPerfect = false;
-    let feedback = '';
-
-    if (dist <= 8) {
-      strikeScore = 35; // 3次完美满分超 100
-      isPerfect = true;
-      feedback = '🔥 完美敲击! +35';
-    } else if (dist <= 18) {
-      strikeScore = 26;
-      feedback = '✨ 优良敲击! +26';
-    } else {
-      strikeScore = 15;
-      feedback = '粗糙敲击 +15';
-    }
-
-    setHitFeedback(feedback);
-    const newTotalScore = accumulatedScore + strikeScore;
-    setAccumulatedScore(newTotalScore);
-
-    // 播放 3D 挥锤动画与火花
-    await sceneRef.current.animateHammerStrike(isPerfect);
-
-    const nextHit = hitIndex + 1;
-    if (nextHit >= 3) {
-      // 3 锤完成锻造！
-      setIsMinigameActive(false);
-      setHitIndex(0);
-      setHitFeedback(null);
-      onFinishForge(newTotalScore);
-    } else {
-      setHitIndex(nextHit);
-    }
-  };
-
-  // 开始锻造
+  // 开始打铁（画面聚焦到铁砧，开启星露谷打铁小游戏）
   const handleBeginForge = () => {
     sound.playClick();
     onStartForge();
     setIsMinigameActive(true);
-    setHitIndex(0);
-    setAccumulatedScore(0);
-    setHitFeedback(null);
+
+    // ★ 关键需求2：画面平滑平移特写到铁砧工作面上！
+    sceneRef.current?.focusAnvil();
+  };
+
+  // 小游戏中每一次敲击传递到 3D 场景
+  const handleMinigameTap = (isPerfect: boolean) => {
+    sceneRef.current?.triggerHammerTap(isPerfect);
+  };
+
+  // 小游戏中实时锻造进度同步给 3D 粗胚
+  const handleProgressUpdate = (progress: number) => {
+    sceneRef.current?.updateForgingProgress(progress, blueprint);
+  };
+
+  // 打铁完成 (进度 100%)
+  const handleMinigameComplete = (accuracyScore: number) => {
+    setIsMinigameActive(false);
+
+    // ★ 关键需求3：淬火白雾升腾，展现武器真面目，镜头拉回全景！
+    sceneRef.current?.quenchAndReveal(blueprint);
+
+    onFinishForge(accuracyScore);
   };
 
   // 试刀横砍木桩
@@ -173,7 +130,7 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
     await sceneRef.current.animateTestStrike(damage, isCrit);
   };
 
-  // 快捷视角操作
+  // 视角操作
   const toggleRotate = () => {
     if (!sceneRef.current) return;
     const next = !autoRotate;
@@ -189,7 +146,11 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
     const next = !showSockets;
     setShowSockets(next);
     sceneRef.current?.toggleSocketVisualizer();
-    sceneRef.current?.displayWeapon(blueprint);
+    if (currentWeapon) {
+      sceneRef.current?.displayWeapon(blueprint);
+    } else {
+      sceneRef.current?.displayWorkpieceTemplate(blueprint);
+    }
   };
 
   return (
@@ -198,7 +159,7 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
       <div ref={containerRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
 
       {/* 2. 悬浮镜头与挂点工具栏 (Top-Left) */}
-      <div className="absolute top-3 left-3 flex flex-wrap gap-1.5 z-10 bg-forge-800/80 backdrop-blur-md p-1.5 rounded-lg border border-slate-700/80">
+      <div className="absolute top-3 left-3 flex flex-wrap gap-1.5 z-10 bg-forge-800/85 backdrop-blur-md p-1.5 rounded-lg border border-slate-700/80 shadow-md">
         <button
           onClick={toggleRotate}
           className={`px-2.5 py-1 rounded text-xs flex items-center gap-1 transition-colors ${
@@ -238,10 +199,27 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
           className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${
             showSockets ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'text-slate-400 hover:text-slate-200'
           }`}
-          title="显示挂点相对吸附标记 (Socket_Blade/Socket_Guard)"
+          title="显示挂点相对吸附标记"
         >
           <Eye className="w-3.5 h-3.5" />
-          <span>插槽拓扑</span>
+          <span>挂点骨架</span>
+        </button>
+
+        {/* ★ 关键需求4：采光与场景调节入口 */}
+        <button
+          onClick={() => {
+            sound.playClick();
+            setIsLightingOpen(!isLightingOpen);
+          }}
+          className={`px-2.5 py-1 rounded text-xs flex items-center gap-1 transition-colors ${
+            isLightingOpen
+              ? 'bg-amber-500 text-slate-950 font-bold'
+              : 'bg-forge-700/80 text-amber-300 hover:bg-forge-600 border border-amber-500/40'
+          }`}
+          title="自定义工坊环境光与画面曝光"
+        >
+          <Sun className="w-3.5 h-3.5" />
+          <span>光影工坊</span>
         </button>
       </div>
 
@@ -254,11 +232,11 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
         <div className="text-[10px] text-amber-400 font-mono mt-0.5">{blueprint.topologyDesc}</div>
       </div>
 
-      {/* 4. 试刀受击浮动伤害跳字 (Screen overlay) */}
+      {/* 4. 试刀受击浮动伤害跳字 */}
       {damageNumbers.map((dmg) => (
         <div
           key={dmg.id}
-          className="absolute pointer-events-none font-black font-fantasy tracking-wider animate-bounce select-none z-20 text-shadow-lg"
+          className="absolute pointer-events-none font-black font-fantasy tracking-wider animate-bounce select-none z-20"
           style={{
             left: `${dmg.x}px`,
             top: `${dmg.y - 20}px`,
@@ -271,53 +249,27 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
         </div>
       ))}
 
+      {/* ★ 关键需求4：场景光影调节面板弹窗 */}
+      <LightingStudioModal
+        isOpen={isLightingOpen}
+        lightingConfig={lightingConfig}
+        onChangeConfig={onUpdateLighting}
+        onClose={() => setIsLightingOpen(false)}
+      />
+
       {/* 5. 底部打铁操作台 (Bottom Console) */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 w-[92%] max-w-2xl bg-forge-800/95 backdrop-blur-lg border border-slate-700/80 rounded-2xl p-4 shadow-2xl z-20">
-        {/* 情况 1：打铁小游戏中 (Minigame Active) */}
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20">
+        {/* 情况 1：星露谷风格打铁淬火小游戏 (Stardew Minigame) */}
         {isMinigameActive ? (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-bold text-amber-300 flex items-center gap-1.5">
-                <Hammer className="w-4 h-4 text-amber-400 animate-bounce" />
-                正在淬火锻造：第 {hitIndex + 1} / 3 锤
-              </span>
-              <span className="font-mono text-slate-300">
-                当前锻造值: <strong className="text-amber-400">{accumulatedScore}</strong>
-                {hitFeedback && <span className="ml-2 text-emerald-400 font-bold">{hitFeedback}</span>}
-              </span>
-            </div>
-
-            {/* 精准打击度量游标尺 */}
-            <div className="relative w-full h-8 bg-forge-900 rounded-lg overflow-hidden border border-slate-700 flex items-center">
-              {/* 完美打击区 (中心金色区) */}
-              <div
-                className="absolute h-full bg-amber-500/35 border-x-2 border-amber-400 flex items-center justify-center text-[10px] font-bold text-amber-200"
-                style={{ left: '42%', width: '16%' }}
-              >
-                完美区 (PERFECT)
-              </div>
-              {/* 次级良好区 */}
-              <div className="absolute h-full bg-sky-500/15" style={{ left: '30%', width: '40%' }} />
-
-              {/* 摆动的游标指示针 */}
-              <div
-                className="absolute top-0 bottom-0 w-1.5 bg-white shadow-glow-gold rounded-full transition-all duration-75"
-                style={{ left: `${indicatorPos}%`, transform: 'translateX(-50%)' }}
-              />
-            </div>
-
-            {/* 挥锤砸击按钮 */}
-            <button
-              onClick={handleHammerStrike}
-              className="w-full py-3 bg-gradient-to-r from-amber-500 via-amber-400 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-black rounded-xl text-sm shadow-glow-gold transition-all active:scale-98 flex items-center justify-center gap-2"
-            >
-              <Hammer className="w-5 h-5" />
-              <span>挥锤敲击! (在完美区点击或按空格)</span>
-            </button>
-          </div>
+          <StardewForgeMinigame
+            blueprint={blueprint}
+            onHammerTap={handleMinigameTap}
+            onProgressUpdate={handleProgressUpdate}
+            onComplete={handleMinigameComplete}
+          />
         ) : currentWeapon ? (
-          /* 情况 2：武器已成型 (Finished weapon ready for Test Strike or Selling) */
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+          /* 情况 2：武器已淬火成型，真身显现 (Finished weapon ready) */
+          <div className="w-[92vw] max-w-2xl bg-forge-800/95 backdrop-blur-lg border border-slate-700/80 rounded-2xl p-4 shadow-2xl flex flex-col sm:flex-row items-center justify-between gap-3">
             <div className="flex items-center space-x-3">
               <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center">
                 <Sword className="w-5 h-5 text-amber-400" />
@@ -342,7 +294,6 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
             </div>
 
             <div className="flex items-center space-x-2 w-full sm:w-auto">
-              {/* 试刀按钮 */}
               <button
                 onClick={handleTestStrike}
                 className="flex-1 sm:flex-none px-4 py-2.5 bg-gradient-to-r from-rose-600 to-rose-700 hover:from-rose-500 hover:to-rose-600 text-white font-bold rounded-xl text-xs shadow-md transition-transform active:scale-95 flex items-center justify-center gap-1.5"
@@ -352,7 +303,6 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
                 <span>试刀砍木桩</span>
               </button>
 
-              {/* 再次锻造 */}
               <button
                 onClick={handleBeginForge}
                 disabled={!canAffordMaterials}
@@ -364,12 +314,13 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
             </div>
           </div>
         ) : (
-          /* 情况 3：待锻造准备界面 (Ready to forge) */
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+          /* 情况 3：待锻造准备界面 (粗胚与全息图纸态) */
+          <div className="w-[92vw] max-w-2xl bg-forge-800/95 backdrop-blur-lg border border-slate-700/80 rounded-2xl p-4 shadow-2xl flex flex-col sm:flex-row items-center justify-between gap-3">
             {/* 配方原料消耗清单 */}
             <div className="space-y-1 w-full sm:w-auto">
               <div className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                <span>锻造所需原料:</span>
+                <Layers className="w-3.5 h-3.5 text-sky-400" />
+                <span>待锻造粗胚所需原料:</span>
                 <span className="text-[10px] text-slate-400">({blueprint.slots.length} 部件插槽)</span>
               </div>
               <div className="flex flex-wrap gap-1.5">
@@ -404,11 +355,11 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
                 className="w-full sm:w-auto px-6 py-2.5 bg-gradient-to-r from-amber-500 via-amber-400 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-black rounded-xl text-xs shadow-glow-gold transition-transform active:scale-95 flex items-center justify-center gap-1.5"
               >
                 <Hammer className="w-4 h-4" />
-                <span>投入原料 敲击锻造</span>
+                <span>置入粗胚 开始淬火锻造</span>
               </button>
             ) : (
               <div className="flex items-center gap-1.5 w-full sm:w-auto">
-                <span className="text-[11px] text-rose-400">原料不足</span>
+                <span className="text-[11px] text-rose-400 font-medium">原料不足</span>
                 {missingMaterials[0] && (
                   <button
                     onClick={() => {
@@ -417,7 +368,7 @@ export const ForgeViewport: React.FC<ForgeViewportProps> = ({
                     }}
                     className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold rounded-lg text-xs transition-colors flex items-center gap-1"
                   >
-                    <span>商会补进 {MATERIALS[missingMaterials[0].id].name}</span>
+                    <span>商会进货 {MATERIALS[missingMaterials[0].id].name}</span>
                   </button>
                 )}
               </div>

@@ -123,3 +123,12 @@ export interface LogMessage {
   text: string;
   type: 'info' | 'success' | 'gold' | 'epiphany' | 'alert';
 }
+
+export interface LightingConfig {
+  ambientIntensity: number; // 0.5 ~ 4.0
+  spotIntensity: number; // 1.0 ~ 8.0
+  fireIntensity: number; // 0.5 ~ 8.0
+  rimIntensity: number; // 0.5 ~ 6.0
+  exposure: number; // 0.8 ~ 2.5
+  bgDarkness: number; // 0.0 ~ 1.0
+}

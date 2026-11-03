@@ -213,3 +213,63 @@ export const RARITY_COLORS: Record<string, { text: string; bg: string; border: s
 export const INITIAL_GOLD = 150;
 export const WANDERING_MERCHANT_INTERVAL_SECONDS = 90; // Arrives every 90s
 export const WANDERING_MERCHANT_STAY_SECONDS = 45; // Stays for 45s
+
+export const DEFAULT_LIGHTING_CONFIG = {
+  ambientIntensity: 2.2,
+  spotIntensity: 5.0,
+  fireIntensity: 4.5,
+  rimIntensity: 2.8,
+  exposure: 1.55,
+  bgDarkness: 0.35,
+};
+
+export const LIGHTING_PRESETS = {
+  bright: {
+    name: '明亮工坊',
+    desc: '全局照度提升，视野开阔通透',
+    config: {
+      ambientIntensity: 2.6,
+      spotIntensity: 5.5,
+      fireIntensity: 4.5,
+      rimIntensity: 2.8,
+      exposure: 1.65,
+      bgDarkness: 0.2,
+    }
+  },
+  studio: {
+    name: '大师展厅',
+    desc: '高反差射灯，突出金属冷冽锋芒与镜面质感',
+    config: {
+      ambientIntensity: 1.8,
+      spotIntensity: 7.0,
+      fireIntensity: 3.0,
+      rimIntensity: 4.5,
+      exposure: 1.7,
+      bgDarkness: 0.5,
+    }
+  },
+  molten: {
+    name: '炽热熔炉',
+    desc: '暖橙烈焰跳动，极具深色打铁氛围感',
+    config: {
+      ambientIntensity: 1.2,
+      spotIntensity: 3.5,
+      fireIntensity: 7.5,
+      rimIntensity: 3.2,
+      exposure: 1.35,
+      bgDarkness: 0.75,
+    }
+  },
+  golden: {
+    name: '午后暖阳',
+    desc: '温润金黄斜射光，柔和自然',
+    config: {
+      ambientIntensity: 2.4,
+      spotIntensity: 4.8,
+      fireIntensity: 3.5,
+      rimIntensity: 2.2,
+      exposure: 1.5,
+      bgDarkness: 0.25,
+    }
+  }
+};

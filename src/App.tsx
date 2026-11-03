@@ -10,6 +10,7 @@ import {
   BlueprintDef,
   BlueprintId,
   ForgedWeapon,
+  LightingConfig,
   LogMessage,
   MaterialId,
   PlayerStats,
@@ -18,6 +19,7 @@ import {
 } from './types/game';
 import {
   BLUEPRINTS,
+  DEFAULT_LIGHTING_CONFIG,
   INITIAL_GOLD,
   MATERIALS,
   QUALITY_CONFIGS,
@@ -133,11 +135,28 @@ export const App: React.FC = () => {
     },
   ]);
 
-  // 7. 弹窗控制
+  // 7. 弹窗控制与光影设置
   const [isMerchantOpen, setIsMerchantOpen] = useState(false);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
   const [epiphanyBlueprint, setEpiphanyBlueprint] = useState<BlueprintDef | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
+
+  const [lightingConfig, setLightingConfig] = useState<LightingConfig>(() => {
+    const saved = localStorage.getItem('blacksmith_lighting');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        // ignore
+      }
+    }
+    return DEFAULT_LIGHTING_CONFIG;
+  });
+
+  const handleUpdateLighting = (cfg: LightingConfig) => {
+    setLightingConfig(cfg);
+    localStorage.setItem('blacksmith_lighting', JSON.stringify(cfg));
+  };
 
   // 记录日志
   const addLog = useCallback((text: string, type: LogMessage['type'] = 'info') => {
@@ -449,6 +468,8 @@ export const App: React.FC = () => {
           blueprint={activeBlueprint}
           inventory={inventory}
           currentWeapon={currentWeapon}
+          lightingConfig={lightingConfig}
+          onUpdateLighting={handleUpdateLighting}
           onStartForge={handleStartForge}
           onFinishForge={handleFinishForge}
           onTestStrike={handleTestStrike}
