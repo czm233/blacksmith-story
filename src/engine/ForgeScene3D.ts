@@ -29,12 +29,16 @@ export class ForgeScene3D {
 
   private anvilGroup: THREE.Group = new THREE.Group();
   private dummyGroup: THREE.Group = new THREE.Group();
-  private hammerMesh: THREE.Group = new THREE.Group();
+  
+  // 右手持锤系统 (右手臂 + 拳头 + 铁锤)
+  private rightArmGroup: THREE.Group = new THREE.Group();
+  private hammerHeadMesh: THREE.Mesh | null = null;
+
+  // 粒子系统
   private sparkParticles: THREE.Points | null = null;
   private sparkPositions: Float32Array = new Float32Array(300);
   private sparkVelocities: THREE.Vector3[] = [];
 
-  // 蒸汽淬火粒子系统
   private steamParticles: THREE.Points | null = null;
   private steamPositions: Float32Array = new Float32Array(150);
   private steamVelocities: THREE.Vector3[] = [];
@@ -46,16 +50,16 @@ export class ForgeScene3D {
   private fireLight!: THREE.PointLight;
   private fillLight!: THREE.DirectionalLight;
 
-  // 交互与视角状态
+  // 交互与视角状态 (默认站在铁砧宽的一侧: theta ≈ PI/2)
   private isDragging: boolean = false;
   private previousMousePosition = { x: 0, y: 0 };
-  private cameraAngle = { theta: 0.35, phi: 1.25, radius: 2.8 };
-  private cameraLookTarget = new THREE.Vector3(0.3, 0.35, 0);
-  public autoRotate: boolean = true;
+  private cameraAngle = { theta: Math.PI / 2, phi: 1.05, radius: 1.05 };
+  private cameraLookTarget = new THREE.Vector3(0, -0.015, 0);
+  public autoRotate: boolean = false;
   private showSockets: boolean = false;
   private animationFrameId: number | null = null;
 
-  // 打击冷却与连击控制
+  // 打击状态
   private isHammerStriking: boolean = false;
 
   // 回调
@@ -91,7 +95,7 @@ export class ForgeScene3D {
     this.buildAnvil();
     this.buildWorkpieceElements();
     this.buildTrainingDummy();
-    this.buildHammer();
+    this.buildRightArmAndHammer();
     this.setupSparkParticleSystem();
     this.setupSteamParticleSystem();
 
@@ -106,17 +110,14 @@ export class ForgeScene3D {
 
   // ==================== 灯光系统与实时调节 ====================
   private setupLighting(config: LightingConfig) {
-    // 1. 环境底光
     this.ambientLight = new THREE.AmbientLight(0xfff8ee, config.ambientIntensity);
     this.scene.add(this.ambientLight);
 
-    // 2. 暖炉火光
     this.fireLight = new THREE.PointLight(0xff7722, config.fireIntensity, 10);
     this.fireLight.position.set(-1.2, 0.4, -0.6);
     this.fireLight.castShadow = true;
     this.scene.add(this.fireLight);
 
-    // 3. 主聚光灯射向铁砧
     this.spotLight = new THREE.SpotLight(0xfff2df, config.spotIntensity);
     this.spotLight.position.set(0.6, 4.2, 1.8);
     this.spotLight.angle = Math.PI / 3.8;
@@ -126,20 +127,15 @@ export class ForgeScene3D {
     this.spotLight.shadow.mapSize.height = 1024;
     this.scene.add(this.spotLight);
 
-    // 4. 金属反光冷色轮廓光
     this.rimLight = new THREE.DirectionalLight(0x93c5fd, config.rimIntensity);
     this.rimLight.position.set(-2.5, 3.2, -2.5);
     this.scene.add(this.rimLight);
 
-    // 5. 补充漫射正前方填充光
     this.fillLight = new THREE.DirectionalLight(0xffeedd, 1.2);
     this.fillLight.position.set(2, 2.5, 2.5);
     this.scene.add(this.fillLight);
   }
 
-  /**
-   * 动态应用用户自定义的光照与环境参数
-   */
   public applyLighting(config: LightingConfig) {
     if (this.ambientLight) this.ambientLight.intensity = config.ambientIntensity;
     if (this.spotLight) this.spotLight.intensity = config.spotIntensity;
@@ -147,7 +143,6 @@ export class ForgeScene3D {
     if (this.rimLight) this.rimLight.intensity = config.rimIntensity;
     if (this.renderer) this.renderer.toneMappingExposure = config.exposure;
 
-    // 背景明暗调节
     const bgVal = Math.max(0.04, 0.16 * (1 - config.bgDarkness * 0.7));
     const bgColor = new THREE.Color(bgVal, bgVal * 1.05, bgVal * 1.3);
     this.scene.background = bgColor;
@@ -159,7 +154,6 @@ export class ForgeScene3D {
 
   // ==================== 工坊环境 ====================
   private buildWorkshopEnvironment() {
-    // 地面石砖
     const floorGeo = new THREE.CylinderGeometry(5.0, 5.0, 0.2, 32);
     const floorMat = new THREE.MeshStandardMaterial({
       color: 0x1c1c28,
@@ -171,7 +165,6 @@ export class ForgeScene3D {
     floor.receiveShadow = true;
     this.scene.add(floor);
 
-    // 圆形锻造基台符文圈
     const ringGeo = new THREE.RingGeometry(0.7, 0.76, 48);
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0xf59e0b,
@@ -185,7 +178,7 @@ export class ForgeScene3D {
     this.scene.add(ring);
   }
 
-  // ==================== 铁砧构建 ====================
+  // ==================== 铁砧构建 (长轴沿 Z，宽侧在 X) ====================
   private buildAnvil() {
     this.anvilGroup = new THREE.Group();
     this.anvilGroup.position.set(0, -0.6, 0);
@@ -198,7 +191,7 @@ export class ForgeScene3D {
     stump.receiveShadow = true;
     this.anvilGroup.add(stump);
 
-    // 铁砧主体 (铸铁质感)
+    // 铁砧主体
     const anvilMat = new THREE.MeshStandardMaterial({ color: 0x2e3038, roughness: 0.35, metalness: 0.85 });
     const baseGeo = new THREE.BoxGeometry(0.32, 0.12, 0.5);
     const base = new THREE.Mesh(baseGeo, anvilMat);
@@ -206,14 +199,14 @@ export class ForgeScene3D {
     base.castShadow = true;
     this.anvilGroup.add(base);
 
-    // 砧面 (工作台面，高约 -0.02m)
+    // 砧面 (工作台面，顶部高约 -0.02m，长 0.58m 沿 Z，宽 0.26m 沿 X)
     const topGeo = new THREE.BoxGeometry(0.26, 0.08, 0.58);
     const top = new THREE.Mesh(topGeo, anvilMat);
     top.position.y = 0.54;
     top.castShadow = true;
     this.anvilGroup.add(top);
 
-    // 砧角 (尖头圆锥)
+    // 砧角 (尖圆锥在 +Z 端)
     const hornGeo = new THREE.ConeGeometry(0.08, 0.22, 12);
     hornGeo.rotateX(-Math.PI / 2);
     const horn = new THREE.Mesh(hornGeo, anvilMat);
@@ -223,36 +216,37 @@ export class ForgeScene3D {
     this.scene.add(this.anvilGroup);
   }
 
-  // ==================== 烧红粗胚与全息图纸 ====================
+  // ==================== 烧红粗胚构建 (横卧在铁砧台面) ====================
   private buildWorkpieceElements() {
     this.workpieceGroup = new THREE.Group();
     this.workpieceGroup.name = 'WorkpieceGroup';
-    this.workpieceGroup.position.set(0, -0.03, 0);
+    // 铁砧顶面实际高度在 y = -0.02m，粗胚横卧其上
+    this.workpieceGroup.position.set(0, -0.012, 0);
 
-    // 1. 烧红的金属粗胚 (Hot Billet)
-    const billetGeo = new THREE.BoxGeometry(0.08, 0.035, 0.32);
+    // 1. 横卧长条金属粗胚 (Hot Billet，长轴沿 Z 延展)
+    const billetGeo = new THREE.BoxGeometry(0.065, 0.02, 0.42);
     const billetMat = new THREE.MeshStandardMaterial({
       color: 0x991b1b,
       roughness: 0.3,
       metalness: 0.8,
       emissive: 0xff3b00,
-      emissiveIntensity: 2.5,
+      emissiveIntensity: 2.6,
     });
     this.hotBilletMesh = new THREE.Mesh(billetGeo, billetMat);
     this.hotBilletMesh.castShadow = true;
     this.workpieceGroup.add(this.hotBilletMesh);
 
-    // 2. 粗胚底下炽热受热微光
-    const glowGeo = new THREE.PlaneGeometry(0.2, 0.4);
+    // 2. 粗胚底部炽热反光
+    const glowGeo = new THREE.PlaneGeometry(0.18, 0.48);
     const glowMat = new THREE.MeshBasicMaterial({
       color: 0xff5500,
       transparent: true,
-      opacity: 0.4,
+      opacity: 0.35,
       side: THREE.DoubleSide
     });
     const glowPlane = new THREE.Mesh(glowGeo, glowMat);
     glowPlane.rotation.x = -Math.PI / 2;
-    glowPlane.position.y = 0.005;
+    glowPlane.position.y = 0.002;
     this.workpieceGroup.add(glowPlane);
 
     this.scene.add(this.workpieceGroup);
@@ -268,14 +262,12 @@ export class ForgeScene3D {
     const strawMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.9, metalness: 0.05 });
     const clothMat = new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.9, metalness: 0.05 });
 
-    // 主干木柱
     const postGeo = new THREE.CylinderGeometry(0.12, 0.14, 1.5, 12);
     const post = new THREE.Mesh(postGeo, woodMat);
     post.position.y = 0.75;
     post.castShadow = true;
     this.dummyGroup.add(post);
 
-    // 横木手臂
     const armGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.75, 10);
     armGeo.rotateZ(Math.PI / 2);
     const arm = new THREE.Mesh(armGeo, woodMat);
@@ -283,21 +275,18 @@ export class ForgeScene3D {
     arm.castShadow = true;
     this.dummyGroup.add(arm);
 
-    // 草人头部
     const headGeo = new THREE.SphereGeometry(0.16, 12, 12);
     const head = new THREE.Mesh(headGeo, strawMat);
     head.position.y = 1.55;
     head.castShadow = true;
     this.dummyGroup.add(head);
 
-    // 头部红头巾
     const wrapGeo = new THREE.TorusGeometry(0.165, 0.03, 8, 16);
     wrapGeo.rotateX(Math.PI / 2);
     const wrap = new THREE.Mesh(wrapGeo, clothMat);
     wrap.position.y = 1.56;
     this.dummyGroup.add(wrap);
 
-    // 胸前靶心红布标靶
     const targetGeo = new THREE.CylinderGeometry(0.13, 0.13, 0.02, 16);
     targetGeo.rotateX(Math.PI / 2);
     const target = new THREE.Mesh(targetGeo, clothMat);
@@ -313,30 +302,60 @@ export class ForgeScene3D {
     this.scene.add(this.dummyGroup);
   }
 
-  // ==================== 铁锤构建 ====================
-  private buildHammer() {
-    this.hammerMesh = new THREE.Group();
-    this.hammerMesh.name = 'ForgeHammer';
+  // ==================== 右手持锤系统 (右手臂 + 拳套 + 锻造方锤) ====================
+  private buildRightArmAndHammer() {
+    this.rightArmGroup = new THREE.Group();
+    this.rightArmGroup.name = 'RightArmAndHammer';
 
-    // 锤柄
-    const handleGeo = new THREE.CylinderGeometry(0.02, 0.022, 0.5, 10);
-    const handleMat = new THREE.MeshStandardMaterial({ color: 0x854d0e, roughness: 0.8 });
+    // 1. 小臂 (皮护腕工匠手臂)
+    const forearmGeo = new THREE.CylinderGeometry(0.036, 0.046, 0.32, 12);
+    const armMat = new THREE.MeshStandardMaterial({
+      color: 0x482b18,
+      roughness: 0.85,
+      metalness: 0.1
+    });
+    const forearm = new THREE.Mesh(forearmGeo, armMat);
+    forearm.rotation.z = Math.PI / 3;
+    forearm.rotation.y = -Math.PI / 6;
+    forearm.position.set(0.16, -0.06, 0.08);
+    this.rightArmGroup.add(forearm);
+
+    // 2. 握持铁锤的手部拳套 (Gloved Fist)
+    const fistGeo = new THREE.BoxGeometry(0.06, 0.065, 0.085);
+    const fistMat = new THREE.MeshStandardMaterial({
+      color: 0x5c3822,
+      roughness: 0.8,
+      metalness: 0.15
+    });
+    const fist = new THREE.Mesh(fistGeo, fistMat);
+    fist.position.set(0.04, 0.02, 0.02);
+    this.rightArmGroup.add(fist);
+
+    // 3. 锤柄 (白蜡木坚韧长柄，被拳头紧握)
+    const handleGeo = new THREE.CylinderGeometry(0.015, 0.017, 0.44, 10);
+    const handleMat = new THREE.MeshStandardMaterial({ color: 0x854d0e, roughness: 0.75 });
     const handle = new THREE.Mesh(handleGeo, handleMat);
-    handle.position.y = 0.25;
-    this.hammerMesh.add(handle);
+    handle.rotation.x = Math.PI / 4;
+    handle.rotation.z = -Math.PI / 12;
+    handle.position.set(0.04, 0.06, 0.04);
+    this.rightArmGroup.add(handle);
 
-    // 锤头 (重型锻造方锤)
-    const headGeo = new THREE.BoxGeometry(0.12, 0.1, 0.18);
-    const headMat = new THREE.MeshStandardMaterial({ color: 0x22262d, roughness: 0.35, metalness: 0.9 });
-    const head = new THREE.Mesh(headGeo, headMat);
-    head.position.set(0, 0.48, 0);
-    head.castShadow = true;
-    this.hammerMesh.add(head);
+    // 4. 重型精铸方锤头 (Hammerhead)
+    const headGeo = new THREE.BoxGeometry(0.09, 0.08, 0.15);
+    const headMat = new THREE.MeshStandardMaterial({
+      color: 0x272b33,
+      roughness: 0.3,
+      metalness: 0.92
+    });
+    this.hammerHeadMesh = new THREE.Mesh(headGeo, headMat);
+    this.hammerHeadMesh.castShadow = true;
+    this.hammerHeadMesh.position.set(0.04, 0.22, 0.15);
+    this.rightArmGroup.add(this.hammerHeadMesh);
 
-    // 初始待命位置 (铁砧上方就位)
-    this.hammerMesh.position.set(0.25, 0.45, 0.15);
-    this.hammerMesh.rotation.set(-0.35, 0.15, 0.55);
-    this.scene.add(this.hammerMesh);
+    // 待命准备姿态：位于视线右前方，斜向上举起
+    this.rightArmGroup.position.set(0.24, 0.22, 0.18);
+    this.rightArmGroup.rotation.set(-0.3, 0.35, 0.25);
+    this.scene.add(this.rightArmGroup);
   }
 
   // ==================== 火花与蒸汽粒子系统 ====================
@@ -388,9 +407,6 @@ export class ForgeScene3D {
     }
   }
 
-  /**
-   * 触发火花飞溅爆发
-   */
   public triggerSparkBurst(origin: THREE.Vector3, count: number = 50, colorHex: number = 0xffaa22) {
     if (!this.sparkParticles) return;
 
@@ -423,9 +439,6 @@ export class ForgeScene3D {
     });
   }
 
-  /**
-   * 触发淬火白雾蒸汽
-   */
   public triggerSteamBurst(origin: THREE.Vector3) {
     if (!this.steamParticles) return;
 
@@ -453,25 +466,26 @@ export class ForgeScene3D {
     });
   }
 
-  // ==================== 打造聚焦与镜头切换 ====================
+  // ==================== 人的视角：站在铁砧宽的一侧 ====================
 
   /**
-   * 打造开始：镜头聚焦特写到铁砧上方工作面
+   * 打造聚焦视角：人站在铁砧宽的一侧 (+X 侧)，近距离俯视横卧在铁砧上的粗胚与武器
    */
   public focusAnvil() {
     this.autoRotate = false;
+    // theta = Math.PI / 2 (直对宽侧), phi = 1.05 (俯视约 30 度), radius = 0.92m
     gsap.to(this.cameraAngle, {
-      theta: 0.22,
-      phi: 0.95,
-      radius: 1.35,
+      theta: Math.PI / 2,
+      phi: 1.05,
+      radius: 0.92,
       duration: 0.75,
       ease: 'power2.inOut',
       onUpdate: () => this.updateCameraPosition()
     });
     gsap.to(this.cameraLookTarget, {
       x: 0,
-      y: 0.02,
-      z: 0.05,
+      y: -0.015,
+      z: 0.02,
       duration: 0.75,
       ease: 'power2.inOut',
       onUpdate: () => this.updateCameraPosition()
@@ -479,47 +493,46 @@ export class ForgeScene3D {
   }
 
   /**
-   * 打造完成或重置：镜头拉回全景展示位
+   * 全景站位视角：站在宽侧稍远处纵观全局
    */
   public focusHeroPedestal() {
     gsap.to(this.cameraAngle, {
-      theta: 0.35,
-      phi: 1.25,
-      radius: 2.8,
-      duration: 0.9,
+      theta: Math.PI / 2 + 0.25,
+      phi: 1.12,
+      radius: 1.85,
+      duration: 0.85,
       ease: 'power2.out',
       onUpdate: () => this.updateCameraPosition()
     });
     gsap.to(this.cameraLookTarget, {
-      x: 0.3,
-      y: 0.35,
+      x: 0,
+      y: 0.05,
       z: 0,
-      duration: 0.9,
+      duration: 0.85,
       ease: 'power2.out',
       onUpdate: () => this.updateCameraPosition(),
       onComplete: () => {
-        this.autoRotate = true;
+        this.autoRotate = false;
       }
     });
   }
 
-  // ==================== 模版与渐进式锻造成型 ====================
+  // ==================== 武器横卧铁砧 + 渐进式显现 ====================
 
   /**
-   * 待锻造状态：仅显示烧红粗胚与半透明全息图纸线框
+   * 待锻造状态：粗胚与全息图纸模版严格【横卧】在铁砧上
    */
   public displayWorkpieceTemplate(blueprint: BlueprintDef) {
-    // 隐藏/移除成品武器
     if (this.weaponGroup) {
       this.scene.remove(this.weaponGroup);
       this.weaponGroup = null;
     }
 
-    // 显示烧红粗胚
+    // 粗胚横卧
     this.workpieceGroup.visible = true;
     if (this.hotBilletMesh) {
       this.hotBilletMesh.scale.set(1, 1, 1);
-      (this.hotBilletMesh.material as THREE.MeshStandardMaterial).emissiveIntensity = 2.4;
+      (this.hotBilletMesh.material as THREE.MeshStandardMaterial).emissiveIntensity = 2.6;
     }
 
     // 移除旧全息线框
@@ -528,7 +541,7 @@ export class ForgeScene3D {
       this.ghostBlueprintGroup = null;
     }
 
-    // 生成全息图纸线框构架 (Blueprint Scaffold Ghost)
+    // 生成全息图纸线框构架，并【横着平放在铁砧上】(沿 Z 轴横向延伸)
     this.ghostBlueprintGroup = this.assembler.assembleWeapon(blueprint, {}, true);
     this.ghostBlueprintGroup.traverse((child) => {
       if (child instanceof THREE.Mesh) {
@@ -536,76 +549,77 @@ export class ForgeScene3D {
           color: 0x38bdf8,
           wireframe: true,
           transparent: true,
-          opacity: 0.35
+          opacity: 0.38
         });
       }
     });
-    this.ghostBlueprintGroup.position.set(0, 0.36, 0);
-    this.ghostBlueprintGroup.scale.set(0.85, 0.85, 0.85);
+
+    // ★ 关键需求：武器横着放在铁砧上 (旋转 90 度躺平)
+    this.ghostBlueprintGroup.rotation.set(Math.PI / 2, 0, 0);
+    this.ghostBlueprintGroup.position.set(0, 0.015, -0.15);
+    this.ghostBlueprintGroup.scale.set(0.9, 0.9, 0.9);
     this.scene.add(this.ghostBlueprintGroup);
+
+    // 视角自动回到宽侧
+    this.focusAnvil();
   }
 
   /**
    * 打造过程中动态更新（进度 0% ~ 100%）：
-   * 粗胚逐渐变形延展，全息线框逐渐充实为炽热真刃并逐步褪火降温！
+   * 粗胚横向延展变薄，全息线框逐渐凝实为实体！
    */
-  public updateForgingProgress(progress: number, blueprint: BlueprintDef) {
+  public updateForgingProgress(progress: number, _blueprint: BlueprintDef) {
     const p = Math.max(0, Math.min(1, progress));
 
-    // 1. 粗胚逐步砸扁延展并融入
     if (this.hotBilletMesh) {
-      const sx = 1 + p * 0.8;
-      const sy = Math.max(0.2, 1 - p * 0.7);
-      const sz = 1 + p * 1.6;
+      // 沿着铁砧长轴横向延展
+      const sx = 1 + p * 0.7;
+      const sy = Math.max(0.25, 1 - p * 0.65);
+      const sz = 1 + p * 1.5;
       this.hotBilletMesh.scale.set(sx, sy, sz);
 
       const mat = this.hotBilletMesh.material as THREE.MeshStandardMaterial;
-      // 随着进度上升，粗胚光度与颜色从赤橙向淬火红转变
       mat.emissive.setHex(p > 0.8 ? 0xd97706 : 0xff3b00);
-      mat.emissiveIntensity = 2.5 + Math.sin(Date.now() * 0.01) * 0.5;
+      mat.emissiveIntensity = 2.6 + Math.sin(Date.now() * 0.01) * 0.6;
     }
 
-    // 2. 全息线框逐渐凝实为实体武器 (半显现)
     if (this.ghostBlueprintGroup) {
-      const ghostOpacity = Math.max(0.1, 0.4 * (1 - p * 0.6));
+      const ghostOpacity = Math.max(0.12, 0.42 * (1 - p * 0.55));
       this.ghostBlueprintGroup.traverse((child) => {
         if (child instanceof THREE.Mesh && child.material) {
           (child.material as THREE.MeshBasicMaterial).opacity = ghostOpacity;
-          // 颜色从蓝图青向锻造金黄转变
           if (p > 0.5) {
             (child.material as THREE.MeshBasicMaterial).color.setHex(0xf59e0b);
           }
         }
       });
-      // 线框位置微降至铁砧表面
-      this.ghostBlueprintGroup.position.y = 0.36 - p * 0.18;
+      // 随着锤打逐渐贴近砧面
+      this.ghostBlueprintGroup.position.y = 0.015 - p * 0.02;
     }
   }
 
   /**
-   * 打造大功告成：淬火升腾白雾，真容展露！
+   * 淬火大功告成：横卧在铁砧上展现成品真容！
    */
   public quenchAndReveal(blueprint: BlueprintDef, slotMaterials: Partial<Record<SlotType, MaterialDef>> = {}) {
-    // 隐藏粗胚与全息线框
     this.workpieceGroup.visible = false;
     if (this.ghostBlueprintGroup) {
       this.scene.remove(this.ghostBlueprintGroup);
       this.ghostBlueprintGroup = null;
     }
 
-    // 播放淬火白雾
+    // 淬火白雾
     sound.playQuenchSteam();
-    this.triggerSteamBurst(new THREE.Vector3(0, -0.02, 0));
-    this.triggerSparkBurst(new THREE.Vector3(0, 0.05, 0), 40, 0xffffff);
+    this.triggerSteamBurst(new THREE.Vector3(0, -0.01, 0));
+    this.triggerSparkBurst(new THREE.Vector3(0, 0.02, 0), 45, 0xffffff);
 
-    // 展露真正的成品武器
+    // ★ 关键需求：成品武器横卧在铁砧上展现！
     this.displayWeapon(blueprint, slotMaterials);
-
-    // 镜头优雅平滑拉回到全景
-    this.focusHeroPedestal();
   }
 
-  // ==================== 武器装配与呈现 (成品态) ====================
+  /**
+   * 展示成品武器：【横卧在铁砧上】
+   */
   public displayWeapon(blueprint: BlueprintDef, slotMaterials: Partial<Record<SlotType, MaterialDef>> = {}) {
     this.workpieceGroup.visible = false;
     if (this.ghostBlueprintGroup) {
@@ -619,17 +633,21 @@ export class ForgeScene3D {
     }
 
     this.weaponGroup = this.assembler.assembleWeapon(blueprint, slotMaterials, this.showSockets);
-    this.weaponGroup.position.set(0, 0.4, 0);
-    this.weaponGroup.rotation.set(0, 0, 0);
+
+    // ★ 关键需求：武器横着放在铁砧上！
+    // 旋转 90 度使剑身沿 Z 轴横向平铺，剑刃躺在砧面 (y = -0.015m)
+    this.weaponGroup.rotation.set(Math.PI / 2, 0, 0);
+    this.weaponGroup.position.set(0, -0.015, -0.15);
     this.scene.add(this.weaponGroup);
 
+    // 轻微进场弹力
     this.weaponGroup.scale.set(0.1, 0.1, 0.1);
     gsap.to(this.weaponGroup.scale, {
       x: 1,
       y: 1,
       z: 1,
-      duration: 0.65,
-      ease: 'back.out(1.8)'
+      duration: 0.5,
+      ease: 'back.out(1.5)'
     });
   }
 
@@ -637,55 +655,69 @@ export class ForgeScene3D {
     this.showSockets = !this.showSockets;
   }
 
-  // ==================== 🔨 实时鼠标挥锤敲打与微震 ====================
+  // ==================== 右手持锤挥打：按一下再敲 ====================
 
   /**
-   * 每次鼠标点击打铁：铁锤闪电下砸 + 顿帧火花 + 镜头微震
+   * 每次鼠标点击打铁：右手持锤由蓄势位下砸砧面，顿帧反弹，绝不自动连击
    */
   public triggerHammerTap(isPerfect: boolean = false) {
     if (this.isHammerStriking) return;
     this.isHammerStriking = true;
 
-    const anvilHitPos = new THREE.Vector3(0, -0.02, 0.02);
+    const anvilHitPos = new THREE.Vector3(0, -0.01, 0.05);
 
-    // 锤头迅速砸下
+    // 右手持锤挥砸动作
     gsap.timeline({
       onComplete: () => {
         this.isHammerStriking = false;
       }
     })
-    .to(this.hammerMesh.position, {
-      x: 0.02,
-      y: 0.02,
-      z: 0.02,
-      duration: 0.06,
+    .to(this.rightArmGroup.position, {
+      x: 0.08,
+      y: 0.06,
+      z: 0.06,
+      duration: 0.07,
       ease: 'power4.in',
       onComplete: () => {
-        // 瞬间：火花爆发 + 砧面高热闪光 + 镜头抖动
-        this.triggerSparkBurst(anvilHitPos, isPerfect ? 60 : 35, isPerfect ? 0xffea00 : 0xff6600);
+        // 瞬间命中铁砧：火花暴射 + 粗胚受力炽亮 + 屏幕微震
+        this.triggerSparkBurst(anvilHitPos, isPerfect ? 65 : 40, isPerfect ? 0xffea00 : 0xff5500);
 
-        // 粗胚受力微颤
         if (this.hotBilletMesh) {
           const mat = this.hotBilletMesh.material as THREE.MeshStandardMaterial;
-          mat.emissiveIntensity = 5.0;
-          gsap.to(mat, { emissiveIntensity: 2.5, duration: 0.2 });
+          mat.emissiveIntensity = 4.8;
+          gsap.to(mat, { emissiveIntensity: 2.6, duration: 0.18 });
         }
 
-        // 镜头微震动 (Screen Shake)
-        const shakeIntensity = isPerfect ? 0.03 : 0.015;
+        // 镜头微幅物理震颤
+        const shakeIntensity = isPerfect ? 0.025 : 0.012;
         gsap.fromTo(this.cameraLookTarget,
-          { y: 0.02 + (Math.random() - 0.5) * shakeIntensity },
-          { y: 0.02, duration: 0.12, ease: 'rough' }
+          { y: -0.015 + (Math.random() - 0.5) * shakeIntensity },
+          { y: -0.015, duration: 0.12, ease: 'rough' }
         );
       }
     })
-    .to(this.hammerMesh.position, {
-      x: 0.25,
-      y: 0.45,
-      z: 0.15,
-      duration: 0.12,
+    .to(this.rightArmGroup.rotation, {
+      x: 0.15,
+      y: 0.12,
+      z: -0.15,
+      duration: 0.07,
+      ease: 'power4.in'
+    }, '<')
+    // 砸中后回弹就位
+    .to(this.rightArmGroup.position, {
+      x: 0.24,
+      y: 0.22,
+      z: 0.18,
+      duration: 0.13,
       ease: 'power2.out'
-    }, '+=0.03');
+    }, '+=0.02')
+    .to(this.rightArmGroup.rotation, {
+      x: -0.3,
+      y: 0.35,
+      z: 0.25,
+      duration: 0.13,
+      ease: 'power2.out'
+    }, '<');
   }
 
   // ==================== ⚔️ 试刀挥砍木桩动画 ====================
@@ -696,6 +728,7 @@ export class ForgeScene3D {
         return;
       }
 
+      // 试刀：拿起横卧的武器，挥斩右侧木桩假人
       const startPos = this.weaponGroup.position.clone();
       const startRot = this.weaponGroup.rotation.clone();
 
@@ -705,19 +738,19 @@ export class ForgeScene3D {
         }
       });
 
-      // 1. 蓄力侧拉
+      // 1. 抓起武器立起蓄力
       tl.to(this.weaponGroup.position, {
         x: 0.5,
         y: 0.45,
         z: 0.6,
-        duration: 0.18,
+        duration: 0.2,
         ease: 'power2.out'
       })
       .to(this.weaponGroup.rotation, {
         x: -0.4,
         y: 0.8,
         z: -1.2,
-        duration: 0.18,
+        duration: 0.2,
         ease: 'power2.out'
       }, '<')
       // 2. 闪电斩向木桩
@@ -733,7 +766,6 @@ export class ForgeScene3D {
           const hitWorldPos = new THREE.Vector3(1.1, 0.4, -0.15);
           this.triggerSparkBurst(hitWorldPos, isCrit ? 70 : 35, isCrit ? 0xff4422 : 0xeab308);
 
-          // 假人受击弹性阻尼晃动
           gsap.fromTo(this.dummyGroup.rotation,
             { z: isCrit ? -0.45 : -0.25, x: 0.15 },
             { z: 0, x: 0, duration: 0.85, ease: 'elastic.out(1.2, 0.25)' }
@@ -757,25 +789,25 @@ export class ForgeScene3D {
           }
         }
       })
-      // 3. 挥砍后回位
+      // 3. 挥砍后平稳放回铁砧横卧态
       .to(this.weaponGroup.position, {
         x: startPos.x,
         y: startPos.y,
         z: startPos.z,
         duration: 0.35,
-        ease: 'back.out(1.4)'
+        ease: 'back.out(1.2)'
       }, '+=0.1')
       .to(this.weaponGroup.rotation, {
         x: startRot.x,
         y: startRot.y,
         z: startRot.z,
         duration: 0.35,
-        ease: 'back.out(1.4)'
+        ease: 'back.out(1.2)'
       }, '<');
     });
   }
 
-  // ==================== 相机更新与事件 ====================
+  // ==================== 相机更新与鼠标操作 ====================
   private updateCameraPosition() {
     const { theta, phi, radius } = this.cameraAngle;
     this.camera.position.x = this.cameraLookTarget.x + radius * Math.sin(phi) * Math.sin(theta);
@@ -786,38 +818,41 @@ export class ForgeScene3D {
 
   public resetCamera() {
     gsap.to(this.cameraAngle, {
-      theta: 0.35,
-      phi: 1.25,
-      radius: 2.8,
+      theta: Math.PI / 2,
+      phi: 1.05,
+      radius: 0.95,
       duration: 0.5,
       onUpdate: () => this.updateCameraPosition()
     });
     gsap.to(this.cameraLookTarget, {
-      x: 0.3,
-      y: 0.35,
-      z: 0,
+      x: 0,
+      y: -0.015,
+      z: 0.02,
       duration: 0.5,
       onUpdate: () => this.updateCameraPosition()
     });
   }
 
   public focusPart(part: 'all' | 'blade' | 'guard') {
-    let targetTheta = 0.35;
-    let targetPhi = 1.25;
-    let targetRadius = 2.8;
+    let targetRadius = 0.95;
+    let targetZ = 0.02;
 
     if (part === 'blade') {
-      targetPhi = 1.1;
-      targetRadius = 1.6;
+      targetZ = 0.18; // 剑身位于 +Z 方向
+      targetRadius = 0.75;
     } else if (part === 'guard') {
-      targetPhi = 1.35;
-      targetRadius = 1.4;
+      targetZ = -0.08; // 护手位于近握柄端
+      targetRadius = 0.65;
     }
 
     gsap.to(this.cameraAngle, {
-      theta: targetTheta,
-      phi: targetPhi,
       radius: targetRadius,
+      duration: 0.6,
+      ease: 'power2.out',
+      onUpdate: () => this.updateCameraPosition()
+    });
+    gsap.to(this.cameraLookTarget, {
+      z: targetZ,
       duration: 0.6,
       ease: 'power2.out',
       onUpdate: () => this.updateCameraPosition()
@@ -850,7 +885,7 @@ export class ForgeScene3D {
 
     dom.addEventListener('wheel', (e) => {
       e.preventDefault();
-      this.cameraAngle.radius = Math.max(0.9, Math.min(5.0, this.cameraAngle.radius + e.deltaY * 0.002));
+      this.cameraAngle.radius = Math.max(0.65, Math.min(3.5, this.cameraAngle.radius + e.deltaY * 0.002));
       this.updateCameraPosition();
     }, { passive: false });
 
@@ -874,26 +909,18 @@ export class ForgeScene3D {
       const delta = clock.getDelta();
       const elapsedTime = clock.getElapsedTime();
 
-      // 武器自转或悬浮待机浮动
-      if (this.weaponGroup) {
-        if (this.autoRotate && !this.isDragging) {
-          this.weaponGroup.rotation.y += delta * 0.5;
-        }
-        this.weaponGroup.position.y = 0.4 + Math.sin(elapsedTime * 2.5) * 0.015;
-      }
-
-      // 全息图纸虚线框自转微浮动
+      // 全息虚线框自转微浮动
       if (this.ghostBlueprintGroup) {
-        this.ghostBlueprintGroup.rotation.y += delta * 0.35;
+        this.ghostBlueprintGroup.position.y = 0.015 + Math.sin(elapsedTime * 2.5) * 0.003;
       }
 
       // 粗胚呼吸热度
       if (this.hotBilletMesh && this.workpieceGroup.visible) {
         const mat = this.hotBilletMesh.material as THREE.MeshStandardMaterial;
-        mat.emissiveIntensity = 2.2 + Math.sin(elapsedTime * 4) * 0.4;
+        mat.emissiveIntensity = 2.4 + Math.sin(elapsedTime * 4) * 0.4;
       }
 
-      // 炉火跳动模拟
+      // 炉火跳动
       if (this.fireLight) {
         this.fireLight.intensity = this.fireLight.intensity * (0.95 + Math.sin(elapsedTime * 9) * 0.05);
       }

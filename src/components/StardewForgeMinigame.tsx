@@ -55,23 +55,21 @@ export const StardewForgeMinigame: React.FC<StardewForgeMinigameProps> = ({
   const totalTimeRef = useRef(0);
   const isFinishedRef = useRef(false);
 
-  // 连击节流与敲击音效控制
-  const lastHoldStrikeRef = useRef(0);
-
-  // 触发单次挥锤敲打并传递音效与3D特效
+  // 触发单次挥锤敲打并传递音效与3D特效 (按一下敲一锤)
   const handleStrike = (isPerfect: boolean = false) => {
     if (isFinishedRef.current) return;
     sound.playHammerHit(isPerfect, true);
     onHammerTap(isPerfect);
-    // 给打铁控温条施加向上的跳动力
+    // 给打铁控温条施加一次向上的跳动力
     playerVelRef.current += 1.8;
   };
 
-  // 监听键盘空格打铁
+  // 监听键盘空格打铁 (按一下敲一锤，按住不连击)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space') {
         e.preventDefault();
+        if (e.repeat) return; // 必须松开再按，防止按住连发
         handleStrike(inZoneRef.current);
       }
     };
@@ -94,16 +92,11 @@ export const StardewForgeMinigame: React.FC<StardewForgeMinigameProps> = ({
 
       // 1. 玩家打铁控温槽物理运动 (重力 + 浮力)
       const gravity = 55; // 像素/秒^2
-      const upwardThrust = 85;
+      const upwardThrust = 78;
 
       if (isMouseDownRef.current) {
+        // 长按仅提供平稳向上浮力控温，不自动连续挥锤！
         playerVelRef.current += upwardThrust * dt;
-
-        // 长按鼠标时周期性自动挥锤打铁 (叮当有声)
-        if (currentTime - lastHoldStrikeRef.current > 180) {
-          handleStrike(inZoneRef.current);
-          lastHoldStrikeRef.current = currentTime;
-        }
       }
 
       playerVelRef.current -= gravity * dt;
@@ -188,7 +181,7 @@ export const StardewForgeMinigame: React.FC<StardewForgeMinigameProps> = ({
           <span>淬火打铁锻造中</span>
         </div>
         <p className="text-[11px] text-slate-300 leading-snug">
-          点击或长按鼠标（或按空格）控制铁砧控温槽，将<strong>淬火温核</strong>维持在槽内！
+          点击鼠标或按空格<strong>按一下敲一锤</strong>，长按平稳维持浮力，将<strong>淬火温核</strong>维持在槽内！
         </p>
         <div className="text-[10px] bg-forge-800 p-2 rounded-lg border border-slate-700/80 space-y-1">
           <div className="flex justify-between text-slate-400">
@@ -202,8 +195,8 @@ export const StardewForgeMinigame: React.FC<StardewForgeMinigameProps> = ({
             </span>
           </div>
         </div>
-        <div className="text-[9px] text-slate-500">
-          💡 每点击一次均会敲击铁砧并伴随打击火花与音效
+        <div className="text-[9px] text-amber-400/90 font-medium">
+          🔨 点按一下砸下一锤，伴随火花与金属回响
         </div>
       </div>
 
